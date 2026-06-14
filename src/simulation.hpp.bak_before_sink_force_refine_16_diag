@@ -2178,7 +2178,6 @@ template <typename problem_t> void AMRSimulation<problem_t>::timeStepWithSubcycl
 #if AMREX_SPACEDIM == 3
 				// redistribute all particles in particleRegister_
 				particleRegister_.redistribute(lev);
-				particleRegister_.diagnoseParticlesBelowFinest(finest_level, grids[finest_level], istep[lev], time);
 #endif // AMREX_SPACEDIM == 3
 
 				// do fix-up on all levels that have been re-gridded

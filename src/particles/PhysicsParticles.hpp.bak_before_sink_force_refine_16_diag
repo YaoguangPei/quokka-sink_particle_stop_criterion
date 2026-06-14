@@ -10,14 +10,12 @@
 #include <string>
 #include <string_view>
 #include <utility>
-#include <vector>
 
 #include <format>
 #include <yaml-cpp/yaml.h>
 
 #include "AMReX_Array4.H"
 #include "AMReX_Box.H"
-#include "AMReX_BoxArray.H"
 #include "AMReX_BLProfiler.H"
 #include "AMReX_BLassert.H"
 #include "AMReX_IntVect.H"
@@ -205,8 +203,6 @@ class PhysicsParticleDescriptorBase
 	[[nodiscard]] virtual auto computeMaxParticleSpeed(int lev) const -> amrex::ValLocPair<amrex::Real, amrex::RealVect> = 0;
 
 	virtual void tagCellsAroundParticles(int lev, amrex::TagBoxArray &tags, amrex::Real time, int ngrow) const = 0;
-
-	[[nodiscard]] virtual auto countParticlesBelowLevel(int finest_lev, const amrex::BoxArray &finest_boxes) const -> std::pair<long, long> = 0;
 
 	virtual auto depositSN(amrex::MultiFab & /*state*/, std::array<amrex::MultiFab, AMREX_SPACEDIM> const * /*state_fc*/, int /*lev*/,
 			       amrex::Real /*time*/, amrex::Real /*dt*/) -> std::pair<int, amrex::Real>
@@ -661,7 +657,7 @@ template <typename ContainerType, typename problem_t, ParticleType particleType>
 			return;
 		}
 
-		constexpr int sink_refine_radius_cells = 16;
+		constexpr int sink_refine_radius_cells = 5;
 		constexpr int refine_radius_cells = (particleType_ == ParticleType::Sink) ? sink_refine_radius_cells : 0;
 		constexpr int refine_radius_sq = refine_radius_cells * refine_radius_cells;
 
@@ -669,82 +665,55 @@ template <typename ContainerType, typename problem_t, ParticleType particleType>
 		const auto plo = geom.ProbLoArray();
 		const auto dxi = geom.InvCellSizeArray();
 
-		std::vector<amrex::IntVect> tagged_cells;
-		for (int particle_lev = 0; particle_lev <= container_->finestLevel(); ++particle_lev) {
-			for (typename ContainerType::ParIterType pti(*container_, particle_lev); pti.isValid(); ++pti) {
-				auto &particles = pti.GetArrayOfStructs();
-				auto *pData = particles().data();
-				const amrex::Long np = pti.numParticles();
-
-				for (amrex::Long idx = 0; idx < np; ++idx) {
-					auto const &p = pData[idx];
-
-					const int ix = static_cast<int>(amrex::Math::floor((p.pos(0) - plo[0]) * dxi[0]));
-					const int iy = static_cast<int>(amrex::Math::floor((p.pos(1) - plo[1]) * dxi[1]));
-					const int iz = static_cast<int>(amrex::Math::floor((p.pos(2) - plo[2]) * dxi[2]));
-
-					for (int dk = -refine_radius_cells; dk <= refine_radius_cells; ++dk) {
-						for (int dj = -refine_radius_cells; dj <= refine_radius_cells; ++dj) {
-							for (int di = -refine_radius_cells; di <= refine_radius_cells; ++di) {
-								const int r2 = di * di + dj * dj + dk * dk;
-								if (r2 > refine_radius_sq) {
-									continue;
-								}
-								tagged_cells.emplace_back(AMREX_D_DECL(ix + di, iy + dj, iz + dk));
-							}
-						}
-					}
-				}
-			}
-		}
+		const int old_allow_multiple_mfiters = amrex::MFIter::allowMultipleMFIters(1);
 
 		for (amrex::MFIter mfi(tags); mfi.isValid(); ++mfi) {
 			const auto tag = tags.array(mfi);
 			const amrex::Box tag_box = mfi.validbox();
-			for (const auto &cell : tagged_cells) {
-				if (tag_box.contains(cell)) {
-					tag(cell[0], cell[1], cell[2]) = amrex::TagBox::SET;
+
+			const int ilo = tag_box.smallEnd(0);
+			const int ihi = tag_box.bigEnd(0);
+			const int jlo = tag_box.smallEnd(1);
+			const int jhi = tag_box.bigEnd(1);
+			const int klo = tag_box.smallEnd(2);
+			const int khi = tag_box.bigEnd(2);
+
+			for (int particle_lev = 0; particle_lev <= container_->finestLevel(); ++particle_lev) {
+				for (typename ContainerType::ParIterType pti(*container_, particle_lev); pti.isValid(); ++pti) {
+					auto &particles = pti.GetArrayOfStructs();
+					auto *pData = particles().data();
+					const amrex::Long np = pti.numParticles();
+
+					amrex::ParallelFor(np, [=] AMREX_GPU_DEVICE(int64_t idx) {
+						auto &p = pData[idx];
+
+						const int ix = static_cast<int>(amrex::Math::floor((p.pos(0) - plo[0]) * dxi[0]));
+						const int iy = static_cast<int>(amrex::Math::floor((p.pos(1) - plo[1]) * dxi[1]));
+						const int iz = static_cast<int>(amrex::Math::floor((p.pos(2) - plo[2]) * dxi[2]));
+
+						for (int dk = -refine_radius_cells; dk <= refine_radius_cells; ++dk) {
+							for (int dj = -refine_radius_cells; dj <= refine_radius_cells; ++dj) {
+								for (int di = -refine_radius_cells; di <= refine_radius_cells; ++di) {
+									const int r2 = di * di + dj * dj + dk * dk;
+									if (r2 > refine_radius_sq) {
+										continue;
+									}
+
+									const int i_tag = ix + di;
+									const int j_tag = iy + dj;
+									const int k_tag = iz + dk;
+
+									if (i_tag >= ilo && i_tag <= ihi && j_tag >= jlo && j_tag <= jhi && k_tag >= klo && k_tag <= khi) {
+										tag(i_tag, j_tag, k_tag) = amrex::TagBox::SET;
+									}
+								}
+							}
+						}
+					});
 				}
 			}
 		}
-	}
-
-	[[nodiscard]] auto countParticlesBelowLevel(int finest_lev, const amrex::BoxArray &finest_boxes) const -> std::pair<long, long> override
-	{
-		long below_finest = 0;
-		long covered_by_finest = 0;
-
-		if (container_ == nullptr || finest_lev <= 0) {
-			return {below_finest, covered_by_finest};
-		}
-
-		const int max_particle_lev = std::min(finest_lev - 1, container_->finestLevel());
-		const auto &geom = container_->Geom(finest_lev);
-		const auto plo = geom.ProbLoArray();
-		const auto dxi = geom.InvCellSizeArray();
-
-		for (int particle_lev = 0; particle_lev <= max_particle_lev; ++particle_lev) {
-			for (typename ContainerType::ParIterType pti(*container_, particle_lev); pti.isValid(); ++pti) {
-				auto &particles = pti.GetArrayOfStructs();
-				auto *pData = particles().data();
-				const amrex::Long np = pti.numParticles();
-
-				for (amrex::Long idx = 0; idx < np; ++idx) {
-					auto const &p = pData[idx];
-					const int ix = static_cast<int>(amrex::Math::floor((p.pos(0) - plo[0]) * dxi[0]));
-					const int iy = static_cast<int>(amrex::Math::floor((p.pos(1) - plo[1]) * dxi[1]));
-					const int iz = static_cast<int>(amrex::Math::floor((p.pos(2) - plo[2]) * dxi[2]));
-					const amrex::IntVect cell{AMREX_D_DECL(ix, iy, iz)};
-
-					++below_finest;
-					if (finest_boxes.contains(cell)) {
-						++covered_by_finest;
-					}
-				}
-			}
-		}
-
-		return {below_finest, covered_by_finest};
+		amrex::MFIter::allowMultipleMFIters(old_allow_multiple_mfiters);
 	}
 
 	void updateParticleProperties(amrex::Real current_time, amrex::Real dt) override
@@ -1123,29 +1092,6 @@ template <typename problem_t> class PhysicsParticleRegister
 				AMREX_ALWAYS_ASSERT(n_error_buf.min() >= 2);
 				descriptor->tagCellsAroundParticles(lev, tags, time, ngrow);
 			}
-		}
-	}
-
-	void diagnoseParticlesBelowFinest(int finest_lev, const amrex::BoxArray &finest_boxes, int step, amrex::Real time) const
-	{
-		long below_finest = 0;
-		long covered_by_finest = 0;
-
-		for (const auto &[type, descriptor] : particleRegistry_) {
-			if (descriptor->getForceFinestLevel()) {
-				const auto [below, covered] = descriptor->countParticlesBelowLevel(finest_lev, finest_boxes);
-				below_finest += below;
-				covered_by_finest += covered;
-			}
-		}
-
-		amrex::ParallelAllReduce::Sum(below_finest, amrex::ParallelContext::CommunicatorSub());
-		amrex::ParallelAllReduce::Sum(covered_by_finest, amrex::ParallelContext::CommunicatorSub());
-
-		if (below_finest > 0) {
-			amrex::Print() << "[SinkFinestLevelCheck] step=" << step << " time=" << time << " finest=" << finest_lev
-			               << " below_finest=" << below_finest << " covered_by_finest_boxes=" << covered_by_finest
-			               << " not_covered_by_finest_boxes=" << (below_finest - covered_by_finest) << "\n";
 		}
 	}
 
