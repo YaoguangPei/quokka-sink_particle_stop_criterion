@@ -320,8 +320,8 @@ void ComputeScaleDown(amrex::MultiFab &state, amrex::MultiFab &accretion_rate, a
 			// Set the density floor before applying accretion. For Quokka's stored
 			// B' = B/sqrt(4*pi), v_A^2 = B'^2/rho = 2 E_B/rho, hence
 			// rho_A,min = 2 E_B / v_A,max^2.
-			double accretion_density_floor = std::max({local_density_floor_arr[bx](i, j, k), jeans_floor_fraction * rho_J,
-			    Particle_Traits<problem_t>::sink_accretion_density_floor});
+			double accretion_density_floor = std::max(
+			    {local_density_floor_arr[bx](i, j, k), jeans_floor_fraction * rho_J, Particle_Traits<problem_t>::sink_accretion_density_floor});
 			if constexpr (Physics_Traits<problem_t>::is_mhd_enabled) {
 				if (max_alfven_speed_capture > 0.0) {
 					AMREX_ASSERT(fab_fc_ptr != nullptr);

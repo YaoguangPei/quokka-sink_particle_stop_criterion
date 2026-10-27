@@ -614,7 +614,7 @@ inline bool SN_smooth_gas_velocity = true; // NOLINT
 // Sink particle accretion
 inline bool sink_particle_use_uniform_kernel = false; // NOLINT. If true, use uniform accretion kernel in a (7 dx)^3 box
 // Maximum allowed Alfv\'en speed after sink accretion in cm/s. A negative value disables the limiter.
-inline amrex::Real sink_max_alfven_speed = -1.0; // NOLINT
+inline amrex::Real sink_max_alfven_speed = -1.0;	      // NOLINT
 inline amrex::Real sink_accretion_jeans_floor_fraction = 0.0; // NOLINT
 
 // Verbosity for particle operations
@@ -695,7 +695,7 @@ template <typename problem_t> inline void particleParmParse()
 	pp.query("sink_max_alfven_speed", sink_max_alfven_speed);
 	pp.query("sink_accretion_jeans_floor_fraction", sink_accretion_jeans_floor_fraction);
 	AMREX_ALWAYS_ASSERT_WITH_MESSAGE(sink_accretion_jeans_floor_fraction >= 0.0 && sink_accretion_jeans_floor_fraction <= 1.0,
-	 "particles.sink_accretion_jeans_floor_fraction must be in [0,1].");
+					 "particles.sink_accretion_jeans_floor_fraction must be in [0,1].");
 	AMREX_ALWAYS_ASSERT_WITH_MESSAGE(sink_max_alfven_speed != 0.0, "particles.sink_max_alfven_speed must be negative (disabled) or positive (cm/s).");
 
 	// Handle SNScheme enum

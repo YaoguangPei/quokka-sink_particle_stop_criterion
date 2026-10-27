@@ -214,7 +214,7 @@ template <typename problem_t> class QuokkaSimulation : public AMRSimulation<prob
 	amrex::Real radiationCflNumber_ = 0.3;
 	int maxSubsteps_ = 10;				// maximum number of radiation subcycles per hydro step
 	amrex::Real dustGasInteractionCoeff_ = 2.5e-34; // erg cm^3 s^−1 K^−3/2
-	amrex::Real volumetricHeatingRate_ = 0.; // optional problem-specific uniform heating, erg cm^-3 s^-1
+	amrex::Real volumetricHeatingRate_ = 0.;	// optional problem-specific uniform heating, erg cm^-3 s^-1
 
 	amrex::Real errorNorm_ = NAN;
 	amrex::Real pressureFloor_ = 0.;
@@ -1244,7 +1244,7 @@ auto QuokkaSimulation<problem_t>::addStrangSplitSourcesWithBuiltin(amrex::MultiF
 			const Real const_heating_rate_per_H = computePhotoelectricHeatingRate(time); // unit: erg/s/H
 			auto const external_heating = makeExternalHeatingRate(lev, time, dt);	     // unit: erg/s/H
 			cool_success = quokka::ResampledCooling::computeCooling<problem_t>(state, state_fc, dt, resampledTables_, tempFloor_,
-												   const_heating_rate_per_H, external_heating, volumetricHeatingRate_);
+											   const_heating_rate_per_H, external_heating, volumetricHeatingRate_);
 		}
 	};
 
@@ -3236,10 +3236,12 @@ template <typename problem_t> void QuokkaSimulation<problem_t>::copyRadiationSta
 // Skip their nonlinear source solves in synchronized AMR; average-down replaces them.
 template <typename problem_t> auto QuokkaSimulation<problem_t>::UncoveredBoxes(int lev, amrex::Box const &bx) const -> amrex::Vector<amrex::Box>
 {
- if (do_subcycle != 0 || lev >= this->finest_level) { return {bx}; }
- amrex::BoxArray covered = this->grids[lev+1];
- covered.coarsen(this->ref_ratio[lev]);
- return amrex::complementIn(bx, covered).boxList().data();
+	if (do_subcycle != 0 || lev >= this->finest_level) {
+		return {bx};
+	}
+	amrex::BoxArray covered = this->grids[lev + 1];
+	covered.coarsen(this->ref_ratio[lev]);
+	return amrex::complementIn(bx, covered).boxList().data();
 }
 
 template <typename problem_t> void QuokkaSimulation<problem_t>::copyHydroState(amrex::MultiFab &dest, amrex::MultiFab const &src)
@@ -3342,36 +3344,35 @@ void QuokkaSimulation<problem_t>::subcycleRadiationAtLevel(int lev, amrex::Real 
 
 			for (amrex::MFIter iter(state_tmp1_cc); iter.isValid(); ++iter) {
 				for (const amrex::Box &indexRange : UncoveredBoxes(lev, iter.validbox())) {
-				auto const &stateTmp1 = state_tmp1_cc.array(iter);
-				auto const &prob_lo = geom[lev].ProbLoArray();
-				auto const &prob_hi = geom[lev].ProbHiArray();
+					auto const &stateTmp1 = state_tmp1_cc.array(iter);
+					auto const &prob_lo = geom[lev].ProbLoArray();
+					auto const &prob_hi = geom[lev].ProbHiArray();
 
-				auto const &radEnergySource_arr = radEnergySource.array(iter);
-				auto const &radFluxSource_arr = radFluxSource.array(iter);
-				auto const &userEnergySource_arr = userEnergySource.array(iter);
-				auto const &userReducedFlux_arr = userReducedFlux.array(iter);
-				RadSystem<problem_t>::AddRadSource(userEnergySource_arr, userReducedFlux_arr, indexRange, dx, prob_lo, prob_hi,
-								   time_subcycle + dt_radiation);
-				RadSystem<problem_t>::MergeUserRadSource(radEnergySource_arr, radFluxSource_arr, userEnergySource_arr, userReducedFlux_arr,
-									 indexRange);
+					auto const &radEnergySource_arr = radEnergySource.array(iter);
+					auto const &radFluxSource_arr = radFluxSource.array(iter);
+					auto const &userEnergySource_arr = userEnergySource.array(iter);
+					auto const &userReducedFlux_arr = userReducedFlux.array(iter);
+					RadSystem<problem_t>::AddRadSource(userEnergySource_arr, userReducedFlux_arr, indexRange, dx, prob_lo, prob_hi,
+									   time_subcycle + dt_radiation);
+					RadSystem<problem_t>::MergeUserRadSource(radEnergySource_arr, radFluxSource_arr, userEnergySource_arr,
+										 userReducedFlux_arr, indexRange);
 
-				// Build face-centered array for MHD-aware radiation coupling
-				std::array<amrex::Array4<const amrex::Real>, AMREX_SPACEDIM> cons_fc_arr;
-				if constexpr (Physics_Traits<problem_t>::is_mhd_enabled) {
-					cons_fc_arr[0] = state_new_fc_[lev][0].const_array(iter);
-					cons_fc_arr[1] = state_new_fc_[lev][1].const_array(iter);
+					// Build face-centered array for MHD-aware radiation coupling
+					std::array<amrex::Array4<const amrex::Real>, AMREX_SPACEDIM> cons_fc_arr;
+					if constexpr (Physics_Traits<problem_t>::is_mhd_enabled) {
+						cons_fc_arr[0] = state_new_fc_[lev][0].const_array(iter);
+						cons_fc_arr[1] = state_new_fc_[lev][1].const_array(iter);
 #if AMREX_SPACEDIM == 3
-					cons_fc_arr[2] = state_new_fc_[lev][2].const_array(iter);
+						cons_fc_arr[2] = state_new_fc_[lev][2].const_array(iter);
 #endif
+					}
+
+					// Full gas update (gas_update_factor = 1.0)
+					RadSystem<problem_t>::AddSourceTerms(stateTmp1, radEnergySource_arr, radFluxSource_arr, indexRange, dt_stage2_implicit,
+									     1.0, dustGasInteractionCoeff_, rad_tol, tempFloor, p_iteration_counter,
+									     p_iteration_failure_counter, cons_fc_arr);
 				}
-
-				// Full gas update (gas_update_factor = 1.0)
-				RadSystem<problem_t>::AddSourceTerms(stateTmp1, radEnergySource_arr, radFluxSource_arr, indexRange, dt_stage2_implicit, 1.0,
-								     dustGasInteractionCoeff_, rad_tol, tempFloor, p_iteration_counter,
-								     p_iteration_failure_counter, cons_fc_arr);
-
 			}
-}
 		}
 
 		// === Stage 3: explicit RK2 + gas LinComb + implicit source terms on state_new ===
@@ -3447,35 +3448,35 @@ void QuokkaSimulation<problem_t>::subcycleRadiationAtLevel(int lev, amrex::Real 
 
 		for (amrex::MFIter iter(state_new_cc_[lev]); iter.isValid(); ++iter) {
 			for (const amrex::Box &indexRange : UncoveredBoxes(lev, iter.validbox())) {
-			auto const &stateNew_cc = state_new_cc_[lev].array(iter);
-			auto const &prob_lo = geom[lev].ProbLoArray();
-			auto const &prob_hi = geom[lev].ProbHiArray();
+				auto const &stateNew_cc = state_new_cc_[lev].array(iter);
+				auto const &prob_lo = geom[lev].ProbLoArray();
+				auto const &prob_hi = geom[lev].ProbHiArray();
 
-			auto const &radEnergySource_arr = radEnergySource.array(iter);
-			auto const &radFluxSource_arr = radFluxSource.array(iter);
-			auto const &userEnergySource_arr = userEnergySource.array(iter);
-			auto const &userReducedFlux_arr = userReducedFlux.array(iter);
-			RadSystem<problem_t>::AddRadSource(userEnergySource_arr, userReducedFlux_arr, indexRange, dx, prob_lo, prob_hi,
-							   time_subcycle + dt_radiation);
-			RadSystem<problem_t>::MergeUserRadSource(radEnergySource_arr, radFluxSource_arr, userEnergySource_arr, userReducedFlux_arr, indexRange);
+				auto const &radEnergySource_arr = radEnergySource.array(iter);
+				auto const &radFluxSource_arr = radFluxSource.array(iter);
+				auto const &userEnergySource_arr = userEnergySource.array(iter);
+				auto const &userReducedFlux_arr = userReducedFlux.array(iter);
+				RadSystem<problem_t>::AddRadSource(userEnergySource_arr, userReducedFlux_arr, indexRange, dx, prob_lo, prob_hi,
+								   time_subcycle + dt_radiation);
+				RadSystem<problem_t>::MergeUserRadSource(radEnergySource_arr, radFluxSource_arr, userEnergySource_arr, userReducedFlux_arr,
+									 indexRange);
 
-			// Build face-centered array for MHD-aware radiation coupling
-			std::array<amrex::Array4<const amrex::Real>, AMREX_SPACEDIM> cons_fc_arr;
-			if constexpr (Physics_Traits<problem_t>::is_mhd_enabled) {
-				cons_fc_arr[0] = state_new_fc_[lev][0].const_array(iter);
-				cons_fc_arr[1] = state_new_fc_[lev][1].const_array(iter);
+				// Build face-centered array for MHD-aware radiation coupling
+				std::array<amrex::Array4<const amrex::Real>, AMREX_SPACEDIM> cons_fc_arr;
+				if constexpr (Physics_Traits<problem_t>::is_mhd_enabled) {
+					cons_fc_arr[0] = state_new_fc_[lev][0].const_array(iter);
+					cons_fc_arr[1] = state_new_fc_[lev][1].const_array(iter);
 #if AMREX_SPACEDIM == 3
-				cons_fc_arr[2] = state_new_fc_[lev][2].const_array(iter);
+					cons_fc_arr[2] = state_new_fc_[lev][2].const_array(iter);
 #endif
-			}
+				}
 
-			// Full gas update (gas_update_factor = 1.0)
-			RadSystem<problem_t>::AddSourceTerms(stateNew_cc, radEnergySource_arr, radFluxSource_arr, indexRange, dt_stage3_implicit, 1.0,
-							     dustGasInteractionCoeff_, rad_tol, tempFloor, p_iteration_counter, p_iteration_failure_counter,
-							     cons_fc_arr);
-
+				// Full gas update (gas_update_factor = 1.0)
+				RadSystem<problem_t>::AddSourceTerms(stateNew_cc, radEnergySource_arr, radFluxSource_arr, indexRange, dt_stage3_implicit, 1.0,
+								     dustGasInteractionCoeff_, rad_tol, tempFloor, p_iteration_counter,
+								     p_iteration_failure_counter, cons_fc_arr);
 			}
-}
+		}
 #ifdef PHOTOCHEMISTRY
 		if (enablePhotoChemistry_ == 1) {
 			std::array<amrex::MultiFab const *, AMREX_SPACEDIM> fc_ptrs{};

@@ -286,8 +286,20 @@ template <typename problem_t> class RadSystem : public HyperbolicSystem<problem_
 
 	static constexpr bool enable_dust_gas_thermal_coupling_model_ = ISM_Traits<problem_t>::enable_dust_gas_thermal_coupling_model;
 	// Compatibility with the current branch's chemical-band transport interface.
-	static constexpr bool thermal_band_photochemistry_ = [] { if constexpr (requires { ISM_Traits<problem_t>::thermal_band_photochemistry; }) { return ISM_Traits<problem_t>::thermal_band_photochemistry; } else { return false; } }();
-	static constexpr bool dust_chemical_band_absorption_ = [] { if constexpr (requires { ISM_Traits<problem_t>::dust_chemical_band_absorption; }) { return ISM_Traits<problem_t>::dust_chemical_band_absorption; } else { return false; } }();
+	static constexpr bool thermal_band_photochemistry_ = [] {
+		if constexpr (requires { ISM_Traits<problem_t>::thermal_band_photochemistry; }) {
+			return ISM_Traits<problem_t>::thermal_band_photochemistry;
+		} else {
+			return false;
+		}
+	}();
+	static constexpr bool dust_chemical_band_absorption_ = [] {
+		if constexpr (requires { ISM_Traits<problem_t>::dust_chemical_band_absorption; }) {
+			return ISM_Traits<problem_t>::dust_chemical_band_absorption;
+		} else {
+			return false;
+		}
+	}();
 
 	static constexpr int nGroups_ = Physics_Traits<problem_t>::nGroups;
 	// Chemical (ionizing) bands occupy the LAST NChemBands groups; the leading nGroupsThermal_ groups

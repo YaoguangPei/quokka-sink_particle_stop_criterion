@@ -7,8 +7,8 @@
 #include "hydro/EOS.hpp"
 #include "hydro/hydro_system.hpp"
 #include "particle_types.hpp"
-#include "particles/particle_utils.hpp"
 #include "particles/SinkBoundCheck.hpp"
+#include "particles/particle_utils.hpp"
 #include "stellarpop_data.hpp"
 #include <array>
 #include <cmath>
@@ -113,7 +113,7 @@ static void createParticlesImpl(ContainerType *container, int mass_idx, amrex::M
 			// Sum up total particles created across all processors
 			amrex::Long global_total_particles = total_particles_created;
 			amrex::ParallelDescriptor::ReduceLongSum(global_total_particles);
-            SinkBoundCheck::flushStep(current_time);
+			SinkBoundCheck::flushStep(current_time);
 
 			// Print the total number of particles created at this time step
 			if (amrex::ParallelDescriptor::IOProcessor()) {
@@ -353,7 +353,10 @@ template <> struct ParticleCreationTraits<ParticleType::Sink> {
 		amrex::Real current_time;
 		amrex::Real dt;
 
-		AMREX_GPU_HOST_DEVICE ParticleChecker(amrex::Real current_time, amrex::Real dt) : current_time(current_time), dt(dt) { SinkBoundCheck::configure(); }
+		AMREX_GPU_HOST_DEVICE ParticleChecker(amrex::Real current_time, amrex::Real dt) : current_time(current_time), dt(dt)
+		{
+			SinkBoundCheck::configure();
+		}
 
 		AMREX_GPU_DEVICE auto operator()(amrex::Array4<const amrex::Real> const &state_arr, amrex::Array4<const amrex::Real> const &accretion_rate_arr,
 						 int i, int j, int k, amrex::GpuArray<amrex::Real, AMREX_SPACEDIM> const &dx,
@@ -362,10 +365,12 @@ template <> struct ParticleCreationTraits<ParticleType::Sink> {
 		{
 			amrex::ignore_unused(current_time, dt);
 			const int eligible = SinkCreationHelpers::checkSinkCreation<problem_t>(state_arr, accretion_rate_arr, i, j, k, dx, fab_fc);
-            if (!eligible || (!SinkBoundCheck::require_bound && !SinkBoundCheck::audit)) { return eligible; }
-            const auto energy = SinkBoundCheck::evaluate<problem_t>(state_arr,i,j,k,dx);
-            SinkBoundCheck::record(current_time,i,j,k,dx[0],energy);
-            return (!SinkBoundCheck::require_bound || energy.bound()) ? eligible : 0;
+			if (!eligible || (!SinkBoundCheck::require_bound && !SinkBoundCheck::audit)) {
+				return eligible;
+			}
+			const auto energy = SinkBoundCheck::evaluate<problem_t>(state_arr, i, j, k, dx);
+			SinkBoundCheck::record(current_time, i, j, k, dx[0], energy);
+			return (!SinkBoundCheck::require_bound || energy.bound()) ? eligible : 0;
 		}
 	};
 

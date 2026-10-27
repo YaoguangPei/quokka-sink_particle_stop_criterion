@@ -172,8 +172,8 @@ auto computeCooling(amrex::MultiFab &mf, std::array<amrex::MultiFab, AMREX_SPACE
 		amrex::ParallelFor(indexRange, [=] AMREX_GPU_DEVICE(int i, int j, int k) noexcept {
 			// cooling function
 			const Real rho = state(i, j, k, HydroSystem<problem_t>::density_index);
-			const Real nH = rho * tables.cloudy_H_mass_fraction / C::m_p;			      // unit: cm^-3
-			const Real heating_rate_per_H = const_heating_rate_per_H + external_heating(i, j, k); // unit: erg/s/H
+			const Real nH = rho * tables.cloudy_H_mass_fraction / C::m_p;					   // unit: cm^-3
+			const Real heating_rate_per_H = const_heating_rate_per_H + external_heating(i, j, k);		   // unit: erg/s/H
 			const ResampledCoolingFunctor user_rhs(rho, tables, heating_rate_per_H * nH + volumetric_heating); // unit: erg/cm^3/s
 
 			// state vector
@@ -192,7 +192,8 @@ auto computeCooling(amrex::MultiFab &mf, std::array<amrex::MultiFab, AMREX_SPACE
 
 			// check if integration failed
 			if (nsteps >= maxStepsODEIntegrate) {
-				Real const Edot = resampled_cooling_function(rho, Eint, tables) + heating_rate_per_H * nH + volumetric_heating; // unit: erg/cm^3/s
+				Real const Edot =
+				    resampled_cooling_function(rho, Eint, tables) + heating_rate_per_H * nH + volumetric_heating; // unit: erg/cm^3/s
 				Real const t_cool = (Edot != 0.0) ? std::abs(Eint / Edot) : std::numeric_limits<Real>::max();
 				printf("max substeps exceeded! rho = %.17e, Eint = %.17e, cooling " // NOLINT
 				       "time = %g, dt = %.17e\n",
