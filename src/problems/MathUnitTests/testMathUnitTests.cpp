@@ -1,0 +1,421 @@
+/// \file testMathUnitTests.cpp
+/// \brief Unit tests of the math utilities: ODE integration and bracketing root finding (host and device).
+///
+
+#include "AMReX_Gpu.H"
+#include "AMReX_GpuContainers.H"
+#include "eos.H"
+#include "extern_parameters.H"
+
+#include "math/ODEIntegrate.hpp"
+#include "math/bracketing_root_finding.hpp"
+#include "math/root_finding.hpp"
+#include "radiation/radiation_system.hpp"
+#include "util/BC.hpp"
+#include "util/valarray.hpp"
+#include <array>
+#include <cfenv>
+#include <cmath>
+#include <format>
+#include <iostream>
+#include <limits>
+#include <numbers>
+
+struct ODETest {};
+
+constexpr double seconds_in_year = 3.154e7;
+
+// function definitions
+
+using amrex::Real;
+
+constexpr double Tgas0 = 6000.;			  // K
+constexpr double rho0 = 0.01 * (C::m_p + C::m_e); // g cm^-3
+
+template <> struct quokka::EOS_Traits<ODETest> {
+	static constexpr double mean_molecular_weight = C::m_u;
+	static constexpr double gamma = 5. / 3.;
+};
+
+struct ODEUserData {
+	amrex::Real rho;
+};
+
+AMREX_GPU_HOST_DEVICE AMREX_FORCE_INLINE auto cooling_function(Real const rho, Real const T) -> Real
+{
+	// use fitting function from Koyama & Inutsuka (2002)
+	Real const gamma_heat = 2.0e-26;
+	Real const lambda_cool = gamma_heat * (1.0e7 * std::exp(-114800. / (T + 1000.)) + 14. * std::sqrt(T) * std::exp(-92. / T));
+	Real const rho_over_mh = rho / (C::m_p + C::m_e);
+	Real const cooling_source_term = rho_over_mh * gamma_heat - (rho_over_mh * rho_over_mh) * lambda_cool;
+	return cooling_source_term;
+}
+
+struct ODECoolingFunctor {
+	Real rho;
+
+	AMREX_GPU_HOST_DEVICE explicit ODECoolingFunctor(Real rho_in) : rho(rho_in) {}
+
+	AMREX_GPU_HOST_DEVICE AMREX_FORCE_INLINE auto operator()(Real /*t*/, quokka::valarray<Real, 1> &y_data, quokka::valarray<Real, 1> &y_rhs) const -> int
+	{
+		// compute temperature
+		Real const Eint = y_data[0];
+		Real const T = quokka::EOS<ODETest>::ComputeTgasFromEint(rho, Eint);
+
+		// compute cooling function
+		y_rhs[0] = cooling_function(rho, T);
+		return 0;
+	}
+};
+
+namespace
+{
+
+auto TestODEIntegration() -> int
+{
+	// initialize EOS
+	init_extern_parameters();
+	Real small_temp = 1e-10;
+	Real small_dens = 1e-100;
+	eos_init(small_temp, small_dens);
+
+	// set up initial conditions
+	const Real Eint0 = quokka::EOS<ODETest>::ComputeEintFromTgas(rho0, Tgas0);
+	const Real Edot0 = cooling_function(rho0, Tgas0);
+	const Real tcool = std::abs(Eint0 / Edot0);
+	const Real max_time = 10.0 * tcool;
+
+	std::cout << "Initial temperature: " << Tgas0 << '\n';
+	std::cout << "Initial cooling time: " << tcool / seconds_in_year << '\n';
+	std::cout << "Initial edot = " << Edot0 << '\n';
+
+	// solve cooling
+	ODECoolingFunctor const coolingFunctor(rho0);
+	quokka::valarray<Real, 1> y = {Eint0};
+	quokka::valarray<Real, 1> const abstol = 1.0e-20 * y;
+	const Real rtol = 1.0e-4; // appropriate for RK12
+	int steps_taken = 0;
+	rk_adaptive_integrate(coolingFunctor, 0, y, max_time, rtol, abstol, steps_taken);
+
+	const Real Tgas = quokka::EOS<ODETest>::ComputeTgasFromEint(rho0, y[0]);
+	// for n_H = 0.01 cm^{-3} (for IK cooling function)
+	const Real Teq = 160.52611612610758;
+	const Real Terr_rel = std::abs(Tgas - Teq) / Teq;
+	const Real reltol = 1.0e-4; // relative error tolerance
+
+	std::cout << "Final temperature: " << Tgas << '\n';
+	std::cout << "Relative error: " << Terr_rel << '\n';
+
+	// Cleanup and exit
+	int status = 0;
+	if ((Terr_rel > reltol) || (std::isnan(Terr_rel))) {
+		status = 1;
+	}
+	return status;
+}
+
+constexpr int nfunc = 12;
+constexpr int nsolver = 3;
+constexpr int max_iter_budget = 200;
+constexpr int max_iter_smooth = 20; // bound for superlinearly convergent cases
+constexpr std::array<const char *, nsolver> solver_names = {"Brent", "ModAB", "TOMS748"};
+
+struct TestCase {
+	const char *name;
+	Real a;
+	Real b;
+	Real root;
+	bool smooth; // simple root of a smooth function: superlinear convergence expected
+};
+
+// clang-format off
+const std::array<TestCase, nfunc> cases = {{
+    {.name = "x^2 - 2", .a = 0.0, .b = 2.0, .root = std::numbers::sqrt2, .smooth = true},
+    {.name = "x^3 - 2x - 5", .a = 2.0, .b = 3.0, .root = 2.0945514815423265, .smooth = true},
+    {.name = "cos(x) - x", .a = 0.0, .b = 1.0, .root = 0.7390851332151607, .smooth = true},
+    {.name = "exp(x) - 10", .a = 0.0, .b = 5.0, .root = std::numbers::ln10, .smooth = true},
+    {.name = "x^10 - 1", .a = 0.0, .b = 1.3, .root = 1.0, .smooth = true},
+    {.name = "(x - 1)^3", .a = 0.0, .b = 3.0, .root = 1.0, .smooth = false},
+    {.name = "tanh(1000 (x - 0.3))", .a = 0.0, .b = 1.0, .root = 0.3, .smooth = false},
+    {.name = "step at 0.3", .a = 0.0, .b = 1.0, .root = 0.3, .smooth = false},
+    {.name = "log(x), reversed", .a = 5.0, .b = 0.5, .root = 1.0, .smooth = true},
+    {.name = "x, root at left end", .a = 0.0, .b = 1.0, .root = 0.0, .smooth = true},
+    {.name = "1e-10 (x - 1e5)", .a = 0.0, .b = 1.0e10, .root = 1.0e5, .smooth = true},
+    {.name = "1e300 (x^3 - 0.027)", .a = 0.0, .b = 1.0, .root = 0.3, .smooth = false}, // interpolation overflows
+}};
+// clang-format on
+
+struct TestFunction {
+	int id;
+
+	AMREX_GPU_HOST_DEVICE AMREX_FORCE_INLINE auto operator()(Real x) const -> Real
+	{
+		switch (id) {
+			case 0:
+				return x * x - 2.0;
+			case 1:
+				return x * x * x - 2.0 * x - 5.0;
+			case 2:
+				return std::cos(x) - x;
+			case 3:
+				return std::exp(x) - 10.0;
+			case 4:
+				return std::pow(x, 10) - 1.0;
+			case 5:
+				return (x - 1.0) * (x - 1.0) * (x - 1.0);
+			case 6:
+				return std::tanh(1000.0 * (x - 0.3));
+			case 7:
+				return (x < 0.3) ? -1.0 : 1.0;
+			case 8:
+				return std::log(x);
+			case 9:
+				return x;
+			case 10:
+				return 1.0e-10 * (x - 1.0e5);
+			default:
+				return 1.0e300 * (x * x * x - 0.027);
+		}
+	}
+};
+
+struct Result {
+	Real root;
+	int iter;
+};
+
+AMREX_GPU_HOST_DEVICE AMREX_FORCE_INLINE auto solve(int solver, int func, Real a, Real b) -> Result
+{
+	const TestFunction f{func};
+	const quokka::math::eps_tolerance<Real> tol{};
+	int iter = max_iter_budget;
+	std::pair<Real, Real> r{};
+	if (solver == 0) {
+		r = quokka::math::brent_solve(f, a, b, tol, iter);
+	} else if (solver == 1) {
+		r = quokka::math::modab_solve(f, a, b, tol, iter);
+	} else {
+		// toms748_solve requires a < b
+		const Real lo = amrex::min(a, b);
+		const Real hi = amrex::max(a, b);
+		r = quokka::math::toms748_solve(f, lo, hi, tol, iter);
+	}
+	return Result{.root = r.second / 2 + r.first / 2, .iter = iter};
+}
+
+auto TestRootFinding() -> int
+{
+	constexpr int ntest = nfunc * nsolver;
+
+	// The overflow test case raises FE_OVERFLOW/FE_INVALID on purpose, so suspend the FP-exception traps
+	// that the test suite enables (amrex.fpe_trap_*) while the solvers run on the host.
+	std::fenv_t fenv{};
+	std::feholdexcept(&fenv);
+
+	// host
+	std::array<Result, ntest> host{};
+	for (int n = 0; n < ntest; ++n) {
+		host[n] = solve(n % nsolver, n / nsolver, cases[n / nsolver].a, cases[n / nsolver].b);
+	}
+
+	// device
+	std::array<Real, nfunc> a_h{};
+	std::array<Real, nfunc> b_h{};
+	for (int i = 0; i < nfunc; ++i) {
+		a_h[i] = cases[i].a;
+		b_h[i] = cases[i].b;
+	}
+	amrex::Gpu::DeviceVector<Real> a_d(nfunc);
+	amrex::Gpu::DeviceVector<Real> b_d(nfunc);
+	amrex::Gpu::DeviceVector<Result> dev_d(ntest);
+	amrex::Gpu::copy(amrex::Gpu::hostToDevice, a_h.begin(), a_h.end(), a_d.begin());
+	amrex::Gpu::copy(amrex::Gpu::hostToDevice, b_h.begin(), b_h.end(), b_d.begin());
+	const Real *a_ptr = a_d.data();
+	const Real *b_ptr = b_d.data();
+	Result *dev_ptr = dev_d.data();
+	amrex::ParallelFor(ntest, [=] AMREX_GPU_DEVICE(int n) noexcept {
+		const int func = n / nsolver;
+		dev_ptr[n] = solve(n % nsolver, func, a_ptr[func], b_ptr[func]);
+	});
+	std::array<Result, ntest> dev{};
+	amrex::Gpu::copy(amrex::Gpu::deviceToHost, dev_d.begin(), dev_d.end(), dev.begin());
+	std::fesetenv(&fenv);
+
+	// check: the bracket midpoint must match the exact root to a few ulp of the scale, and smooth simple roots must converge in few iterations
+	int status = 0;
+	std::cout << std::format("{:<24}{:<9}{:>6}{:>6}{:>12}{:>12}\n", "function", "solver", "iter", "(dev)", "rel err", "(dev)");
+	for (int n = 0; n < ntest; ++n) {
+		const TestCase &tc = cases[n / nsolver];
+		const Real scale = (tc.root == 0) ? 1.0 : std::abs(tc.root);
+		const Real reltol = 1.0e-13;
+		const Real err_h = std::abs(host[n].root - tc.root) / scale;
+		const Real err_d = std::abs(dev[n].root - tc.root) / scale;
+		const int iter_limit = tc.smooth ? max_iter_smooth : max_iter_budget - 1;
+		const bool ok = (err_h <= reltol) && (err_d <= reltol) && (host[n].iter <= iter_limit) && (dev[n].iter <= iter_limit);
+		std::cout << std::format("{:<24}{:<9}{:>6}{:>6}{:>12.2e}{:>12.2e}{}\n", tc.name, solver_names[n % nsolver], host[n].iter, dev[n].iter, err_h,
+					 err_d, ok ? "" : "  FAIL");
+		if (!ok) {
+			status = 1;
+		}
+	}
+
+	std::cout << (status == 0 ? "Root finding: all tests passed.\n" : "Root finding: FAILED.\n");
+	return status;
+}
+
+// --- bracket_root_of_increasing ---
+// The coupling solver (radiation_coupling.hpp) builds its bracket by marching from the old state (hydro3d.jl,
+// docs/coupling-new-method.md section 3.3). Each case pins the exact sequence of probes.
+struct MarchOutcome {
+	Real lo;
+	Real hi;
+	Real flo;
+	Real fhi;
+	int nevals;
+	bool found;
+};
+
+AMREX_GPU_HOST_DEVICE AMREX_FORCE_INLINE auto run_march_case(int which) -> MarchOutcome
+{
+	quokka::math::BracketMarchResult<Real> m{};
+	if (which == 0) {
+		// upward: x - 3 from 0.5 probes 0.5, 1, 2, 4 and brackets [2, 4]
+		m = quokka::math::bracket_root_of_increasing([](Real x) { return x - 3; }, 0.5, 0.01);
+	} else if (which == 1) {
+		// downward: x - 3 from 40 probes 40, 20, 10, 5, 2.5 and brackets [2.5, 5]
+		m = quokka::math::bracket_root_of_increasing([](Real x) { return x - 3; }, 40.0, 0.01);
+	} else if (which == 2) {
+		// no root above the floor: x + 1 from 1 with xmin 0.25 probes 1, 0.5, 0.25 and reports not found
+		m = quokka::math::bracket_root_of_increasing([](Real x) { return x + 1; }, 1.0, 0.25);
+	} else if (which == 3) {
+		// an exact zero at the start is a bracket of zero width
+		m = quokka::math::bracket_root_of_increasing([](Real x) { return x - 2; }, 2.0, 0.01);
+	} else {
+		// a non-finite residual ends the march at once, reported not found
+		m = quokka::math::bracket_root_of_increasing([](Real /*x*/) { return std::numeric_limits<Real>::quiet_NaN(); }, 1.0, 0.01);
+	}
+	return MarchOutcome{.lo = m.lo, .hi = m.hi, .flo = m.flo, .fhi = m.fhi, .nevals = m.nevals, .found = m.found};
+}
+
+AMREX_GPU_HOST_DEVICE AMREX_FORCE_INLINE auto march_case_ok(int which, MarchOutcome const &o) -> bool
+{
+	if (which == 0) {
+		return o.found && (o.lo == 2.0) && (o.hi == 4.0) && (o.flo == -1.0) && (o.fhi == 1.0) && (o.nevals == 4);
+	}
+	if (which == 1) {
+		return o.found && (o.lo == 2.5) && (o.hi == 5.0) && (o.flo == -0.5) && (o.fhi == 2.0) && (o.nevals == 5);
+	}
+	if (which == 2) {
+		return !o.found && (o.lo == 0.25) && (o.hi == 0.5) && (o.nevals == 3);
+	}
+	if (which == 3) {
+		return o.found && (o.lo == 2.0) && (o.hi == 2.0) && (o.nevals == 1);
+	}
+	return !o.found && (o.lo == 1.0) && (o.hi == 1.0) && (o.nevals == 1);
+}
+
+auto TestBracketMarch() -> int
+{
+	constexpr int ncase = 5;
+	int status = 0;
+	amrex::Gpu::DeviceVector<MarchOutcome> dev_d(ncase);
+	MarchOutcome *dev_ptr = dev_d.data();
+	amrex::ParallelFor(ncase, [=] AMREX_GPU_DEVICE(int n) noexcept { dev_ptr[n] = run_march_case(n); });
+	std::array<MarchOutcome, ncase> dev{};
+	amrex::Gpu::copy(amrex::Gpu::deviceToHost, dev_d.begin(), dev_d.end(), dev.begin());
+	for (int n = 0; n < ncase; ++n) {
+		const MarchOutcome host = run_march_case(n);
+		const bool ok = march_case_ok(n, host) && march_case_ok(n, dev[n]);
+		std::cout << std::format("bracket march case {}: [{}, {}] in {} evals, found = {}{}\n", n, host.lo, host.hi, host.nevals, host.found,
+					 ok ? "" : "  FAIL");
+		if (!ok) {
+			status = 1;
+		}
+	}
+	// secant_point: the chord crossing of [2, 4] with f = x - 3 is exactly 3; equal residuals fall back to the midpoint
+	{
+		const quokka::math::BracketSolveResult<Real> b{.lo = 2.0, .hi = 4.0, .flo = -1.0, .fhi = 1.0};
+		const quokka::math::BracketSolveResult<Real> flat{.lo = 2.0, .hi = 4.0, .flo = -1.0, .fhi = -1.0};
+		const bool ok = (quokka::math::secant_point(b) == 3.0) && (quokka::math::secant_point(flat) == 3.0);
+		std::cout << std::format("secant point of [2, 4]: {}{}\n", quokka::math::secant_point(b), ok ? "" : "  FAIL");
+		status = ok ? status : 1;
+	}
+	std::cout << (status == 0 ? "Bracket march: all tests passed.\n" : "Bracket march: FAILED.\n");
+	return status;
+}
+
+// --- brent_solve on a residual flat at round-off next to the root ---
+// The coupling residual is quantized at round-off near its root: in DTypeFront1D's dust solve it is linear far from the
+// root, sits at one tiny level (-2.4e-23) just below it and jumps to the next (6.6e-21) above it. Brent's interpolation
+// then lands on the flat side again and again, and the minimum-step safeguard advances it by tol1 per iteration; the
+// solver must notice and bisect. The root is placed at several mantissas, because the stored safeguard step is tol1
+// rounded to the ulp of the iterate, which rounds up or down with the mantissa. With the bisection test comparing the
+// last step with tol1 itself, m = 1.3, 1.4, 1.8, 1.9 take 66 to 87 evaluations; with 2 tol1, every case takes 30.
+constexpr int nflat = 6;
+constexpr int max_evals_flat = 40;
+
+AMREX_GPU_HOST_DEVICE AMREX_FORCE_INLINE auto run_flat_case(int which) -> Result
+{
+	const amrex::GpuArray<Real, nflat> mantissa{1.0, 1.1, 1.3, 1.4, 1.8, 1.9};
+	const Real r = 32.0 * mantissa[which];
+	const Real slope = 1.2e-9;
+	const Real jump = 6.6e-21;
+	const Real flat_width = jump / slope;
+	auto f = [=](Real x) -> Real {
+		if (x >= r) {
+			return jump + slope * (x - r);
+		}
+		if (x >= r - flat_width) {
+			return -1.0e-23;
+		}
+		return slope * (x - r);
+	};
+	quokka::math::eps_tolerance<Real> tol(1.0e-8);
+	int iter = 100;
+	const auto [lo, hi] = quokka::math::brent_solve(f, r / 2, 2 * r, tol, iter);
+	return Result{.root = tol(lo, hi) ? 1.0 : 0.0, .iter = iter};
+}
+
+auto TestBrentFlatResidual() -> int
+{
+	int status = 0;
+	amrex::Gpu::DeviceVector<Result> dev_d(nflat);
+	Result *dev_ptr = dev_d.data();
+	amrex::ParallelFor(nflat, [=] AMREX_GPU_DEVICE(int n) noexcept { dev_ptr[n] = run_flat_case(n); });
+	std::array<Result, nflat> dev{};
+	amrex::Gpu::copy(amrex::Gpu::deviceToHost, dev_d.begin(), dev_d.end(), dev.begin());
+	for (int n = 0; n < nflat; ++n) {
+		const Result host = run_flat_case(n);
+		const bool ok = (host.root == 1) && (dev[n].root == 1) && (host.iter <= max_evals_flat) && (dev[n].iter <= max_evals_flat);
+		std::cout << std::format("brent flat residual case {}: converged = {}, iter = {} (dev {}){}\n", n, host.root == 1, host.iter, dev[n].iter,
+					 ok ? "" : "  FAIL");
+		if (!ok) {
+			status = 1;
+		}
+	}
+	std::cout << (status == 0 ? "Brent flat residual: all tests passed.\n" : "Brent flat residual: FAILED.\n");
+	return status;
+}
+
+} // namespace
+
+auto problem_main() -> int
+{
+	const int ode_status = TestODEIntegration();
+	const int root_status = TestRootFinding();
+	const int march_status = TestBracketMarch();
+	const int flat_status = TestBrentFlatResidual();
+	if (ode_status != 0) {
+		std::cout << "MathUnitTests: ODE integration test FAILED.\n";
+	}
+	if (root_status != 0) {
+		std::cout << "MathUnitTests: root finding test FAILED.\n";
+	}
+	if (march_status != 0) {
+		std::cout << "MathUnitTests: bracket march test FAILED.\n";
+	}
+	if (flat_status != 0) {
+		std::cout << "MathUnitTests: brent flat residual test FAILED.\n";
+	}
+	return ((ode_status != 0) || (root_status != 0) || (march_status != 0) || (flat_status != 0)) ? 1 : 0;
+}

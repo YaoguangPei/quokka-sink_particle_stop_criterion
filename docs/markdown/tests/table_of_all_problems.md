@@ -51,6 +51,8 @@ This table lists all test problems in the Quokka codebase. The acronyms used are
 | HydroVacuum                       | 1   | ✅     | ❌   | ❌                 | ❌       | ❌                         | ❌              |
 | HydroWaveConvergence              | 1   | ✅     | ❌   | ❌                 | ❌       | ❌                         | ❌              |
 | HydrostaticAtmosphere             | 1   | ✅     | ❌   | ❌                 | ❌       | ❌                         | ❌              |
+| MathUnitTests                     | 1   | ❌     | ❌   | ❌                 | ❌       | ❌                         | ❌              |
+| RadCouplingUnitTests              | 1   | ❌     | ❌   | SG+MG (single-cell) | ❌       | ❌                         | ❌              |
 | MHDBalsaraVortex                  | 3   | ✅     | ✅   | ❌                 | ❌       | ❌                         | ❌              |
 | MHDBitwiseICs                     | 3   | ✅     | ✅   | ❌                 | ❌       | ❌                         | ❌              |
 | MHDBlast                          | 3   | ✅     | ✅   | ❌                 | ❌       | ❌                         | ❌              |
@@ -58,7 +60,6 @@ This table lists all test problems in the Quokka codebase. The acronyms used are
 | MHDResistiveEnergyFluxKernel      | 3   | ✅     | ✅   | ❌                 | ❌       | ❌                         | ❌              |
 | NscbcChannel                      | 1   | ✅     | ❌   | ❌                 | ❌       | ❌                         | 1              |
 | NscbcVortex                       | 2   | ✅     | ❌   | ❌                 | ❌       | ❌                         | 1              |
-| ODEIntegration                    | 1   | ❌     | ❌   | ❌                 | ❌       | ❌                         | ❌              |
 | OneZonePhotoionization            | 1   | ❌     | ❌   | SG                | ❌       | ❌                         | ❌              |
 | OrszagTang                        | 3   | ✅     | ✅   | ❌                 | ❌       | ❌                         | ❌              |
 | ParticleAccretion                 | 3   | ✅     | ✅   | ❌                 | ✅       | Sink                      | ❌              |
@@ -76,13 +77,10 @@ This table lists all test problems in the Quokka codebase. The acronyms used are
 | RadDust                           | 1   | ✅     | ❌   | SG+ThermalDust    | ❌       | ❌                         | ❌              |
 | RadDustMG                         | 1   | ✅     | ❌   | MG+ThermalDust    | ❌       | ❌                         | ❌              |
 | RadForce                          | 1   | ✅     | ❌   | SG                | ❌       | ❌                         | ❌              |
-| RadLineCooling                    | 1   | ✅     | ❌   | SG+ThermalDust    | ❌       | ❌                         | ❌              |
-| RadLineCoolingMG                  | 1   | ✅     | ❌   | MG+ThermalDust+PE | ❌       | ❌                         | ❌              |
 | RadMarshak                        | 1   | ❌     | ❌   | SG                | ❌       | ❌                         | ❌              |
 | RadMarshakAsymptotic              | 1   | ❌     | ❌   | SG                | ❌       | ❌                         | ❌              |
 | RadMarshakCGS                     | 1   | ❌     | ❌   | SG                | ❌       | ❌                         | ❌              |
 | RadMarshakDust                    | 1   | ❌     | ❌   | MG+ThermalDust    | ❌       | ❌                         | ❌              |
-| RadMarshakDustPE                  | 1   | ❌     | ❌   | MG+ThermalDust+PE | ❌       | ❌                         | ❌              |
 | RadMarshakVaytet                  | 1   | ❌     | ❌   | MG                | ❌       | ❌                         | ❌              |
 | RadMatterCoupling                 | 1   | ❌     | ❌   | SG                | ❌       | ❌                         | ❌              |
 | RadMatterCouplingRSLA             | 1   | ❌     | ❌   | SG                | ❌       | ❌                         | ❌              |

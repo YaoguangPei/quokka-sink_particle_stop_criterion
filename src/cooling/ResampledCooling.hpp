@@ -135,9 +135,11 @@ struct ResampledCoolingFunctor {
 
 // const_heating_rate_per_H: spatially uniform heating rate, unit erg/s/H
 // external_heating: optional position-dependent heating rate added to it, unit erg/s/H
+// volumetric_heating: optional uniform heating in erg/cm^3/s, integrated together with cooling
 template <typename problem_t>
 auto computeCooling(amrex::MultiFab &mf, std::array<amrex::MultiFab, AMREX_SPACEDIM> const &mf_fc, const Real dt_in, resampled_tables &resampledTables,
-		    const Real temp_floor, const Real const_heating_rate_per_H, ExternalHeatingRate const &external_heating = {}) -> bool
+		    const Real temp_floor, const Real const_heating_rate_per_H, ExternalHeatingRate const &external_heating = {},
+		    const Real volumetric_heating = 0.) -> bool
 {
 	const BL_PROFILE("quokka::ResampledCooling::computeCooling()");
 
@@ -172,7 +174,7 @@ auto computeCooling(amrex::MultiFab &mf, std::array<amrex::MultiFab, AMREX_SPACE
 			const Real rho = state(i, j, k, HydroSystem<problem_t>::density_index);
 			const Real nH = rho * tables.cloudy_H_mass_fraction / C::m_p;			      // unit: cm^-3
 			const Real heating_rate_per_H = const_heating_rate_per_H + external_heating(i, j, k); // unit: erg/s/H
-			const ResampledCoolingFunctor user_rhs(rho, tables, heating_rate_per_H * nH);	      // unit: erg/cm^3/s
+			const ResampledCoolingFunctor user_rhs(rho, tables, heating_rate_per_H * nH + volumetric_heating); // unit: erg/cm^3/s
 
 			// state vector
 			const Real Eint = HydroSystem<problem_t>::ComputeInternalEnergy(state, i, j, k, &state_fc);
@@ -190,7 +192,7 @@ auto computeCooling(amrex::MultiFab &mf, std::array<amrex::MultiFab, AMREX_SPACE
 
 			// check if integration failed
 			if (nsteps >= maxStepsODEIntegrate) {
-				Real const Edot = resampled_cooling_function(rho, Eint, tables) + heating_rate_per_H * nH; // unit: erg/cm^3/s
+				Real const Edot = resampled_cooling_function(rho, Eint, tables) + heating_rate_per_H * nH + volumetric_heating; // unit: erg/cm^3/s
 				Real const t_cool = (Edot != 0.0) ? std::abs(Eint / Edot) : std::numeric_limits<Real>::max();
 				printf("max substeps exceeded! rho = %.17e, Eint = %.17e, cooling " // NOLINT
 				       "time = %g, dt = %.17e\n",

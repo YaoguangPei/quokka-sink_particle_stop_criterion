@@ -1,0 +1,63 @@
+# Stop after 2 initial free-fall times (6.741959080151068 Myr).
+# Thermally balanced rerun: uniform volumetric background heating is calibrated at startup.
+# Radiation remains dynamical; this is initial gas-source balance, not a fixed-temperature model.
+# 1000 Msun sphere; rho = 2.33 m_H n, m_H=1.6735575e-24 g.
+# R=3.460368234972537 pc; box side=16R.
+geometry.prob_lo = [-8.5420645490876875e+19, -8.5420645490876875e+19, -8.5420645490876875e+19]
+geometry.prob_hi = [8.5420645490876875e+19, 8.5420645490876875e+19, 8.5420645490876875e+19]
+geometry.is_periodic = [0, 0, 0]
+amr.n_cell = [128, 128, 128]
+amr.max_level = 7
+amr.blocking_factor = 8
+amr.max_grid_size = 32
+amr.n_error_buf = 3
+amr.grid_eff = 0.8
+amr.v = 1
+regrid_interval = 2
+do_reflux = 1
+do_subcycle = 0
+poisson_supercycle_interval = 1
+hydro.reconstruction_order = 3
+hydro.use_dual_energy = 1
+hydro.artificial_viscosity_coefficient = 0.1
+cfl = 0.3
+init_shrink = 0.1
+cooling.enabled = 1
+cooling.cooling_table_type = "resampled"
+cooling.hdf5_data_file = "extern/cooling/CloudyData_UVB=HM2012_shielded_resampled.h5"
+heating_rate_external = "0.0"
+density_floor = 3.8993889750000006e-25
+temperature_floor = 10.0
+problem.cloud_mass_msun = 1000.0
+problem.cloud_number_density = 100.0
+problem.ambient_number_density = 1.0
+problem.cloud_temperature = 48.9
+problem.balance_thermal_sources = 1
+problem.radiation_temperature = 10.0
+problem.jeans_refinement_ncells = 10
+# Official StarCluster IC file interface. No time-dependent forcing.
+perturb.filename = "src/turbulence/zdrv.hdf5"
+perturb.virial_parameter = 1.0
+turbulence.enabled = 0
+particles.verbose = 1
+particles.sink_particle_use_uniform_kernel = false
+particles.disable_particle_drift = false
+particles.sink_accretion_jeans_floor_fraction = 0.0
+particles.sink_creation_require_bound = false
+particles.sink_creation_bound_audit = false
+radiation.reconstruction_order = 3
+radiation.cfl = 0.3
+radiation.max_substeps = 512
+radiation.dust_gas_interaction_coeff = 2.5e-32
+stop_time = 212760047867775.34
+max_timesteps = 100000000
+# Seconds: plt every 0.01 Myr, chk every 0.1 Myr.
+plottime_interval = 3.15576e11
+checkpointtime_interval = 3.15576e12
+checkpoint_interval = 100000000
+plotfile_prefix = "balanced_turbIC_plt"
+checkpoint_prefix = "balanced_turbIC_chk"
+statistics_interval = 10
+statistics_file = "balanced_turbIC_statistics.txt"
+skip_initial_plotfile = 0
+derived_vars = ["temperature", "number_density", "sound_speed", "jeans_length", "gpot"]

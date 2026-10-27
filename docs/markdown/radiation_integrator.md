@@ -6,7 +6,7 @@ The radiation integrator advances the coupled radiation–matter system using th
 
 - **Substep count:** `computeNumberOfRadiationSubsteps` determines the integer number of radiation substeps needed to cover the hydro timestep at the radiation CFL number. When hydro is disabled or a constant timestep is in use, a single substep is taken.
 - **State management:** At the start of each substep after the first, `swapRadiationState` copies the radiation hyperbolic variables from `state_new_cc_` back into `state_old_cc_`, so that the integrator always has a clean "old" radiation state to advance from while the hydro variables remain in `state_new_cc_`.
-- **IMEX stages per substep:** Each substep applies the 3-stage IMEX PD-ARS scheme — one explicit Forward Euler stage and one explicit RK2 corrector stage, each followed by an implicit Newton–Raphson solve for the stiff matter–radiation coupling.
+- **IMEX stages per substep:** Each substep applies the 3-stage IMEX PD-ARS scheme — one explicit Forward Euler stage and one explicit RK2 corrector stage, each followed by an implicit solve for the stiff matter–radiation coupling.
 - **Particle source injection:** In 3D, stellar particles deposit their luminosity into `radEnergySource` before each implicit solve, giving a cell-centred luminosity density (erg s⁻¹ cm⁻³).
 - **User source injection:** `RadSystem<problem_t>::AddRadSource` is called before each implicit solve and lets a problem add its own radiation source. It writes two scratch buffers of its own, zeroed beforehand: `radEnergySource`, a luminosity volume density per group, and `reducedFluxSource`, the *reduced* flux \\(f = F/(cE)\\) of the injected radiation in component \\(3g + n\\) for group \\(g\\) along direction \\(n\\). `MergeUserRadSource` then converts the pair into a real flux source and adds both to the solver's buffers. Asking for a reduced flux rather than a flux makes \\(|F| > cE\\) unrepresentable: a reduced flux of unit magnitude injects fully beamed, free-streaming radiation for either kind of band, and leaving it at zero injects isotropically. The energy source is scaled internally by \\(\hat c / c\\) for a thermal group and not at all for a chemistry band, and the derived flux source inherits the same scaling.
 - **Flux register coupling:** Radiation fluxes are accumulated into `FluxRegister`s for later refluxing across AMR coarse/fine interfaces.
@@ -118,7 +118,7 @@ advanceRadiationForwardEuler(..., state_tmp1_cc)
 //    → state_tmp1_rad = state_old_rad + dt * Aex_21 * s(state_old_rad)
 //      state_tmp1_gas = gas_n (unchanged by PredictStep)
 
-// 3. Implicit solve: full Newton-Raphson with dt_implicit = Aim_22 * dt
+// 3. Implicit solve: the bracketed coupling solve with dt_implicit = Aim_22 * dt
 AddSourceTerms(state_tmp1_cc, dt_implicit = Aim_22 * dt, gas_update_factor = 1.0)
 //    → state_tmp1 = U^(2) (radiation + gas fully updated)
 ```
@@ -141,7 +141,7 @@ advanceRadiationMidpointRK2(..., state_inter = state_tmp1_cc)
 //    state_new_gas = (1 - alpha) * state_new_gas + alpha * state_tmp1_gas
 //                  = 0.5 * gas_n + 0.5 * state_tmp1_gas
 
-// 6. Implicit solve of `U^(3) = U^(3)* + dt Aim_33 * g(U^(3))`: Newton-Raphson with dt_implicit = Aim_33 * dt = 0.5 * dt
+// 6. Implicit solve of `U^(3) = U^(3)* + dt Aim_33 * g(U^(3))`: the bracketed coupling solve with dt_implicit = Aim_33 * dt = 0.5 * dt
 AddSourceTerms(state_new_cc_, dt_implicit = Aim_33 * dt, gas_update_factor = 1.0)
 //    → state_new = U^(3)
 ```
@@ -155,14 +155,13 @@ AddSourceTerms(state_new_cc_, dt_implicit = Aim_33 * dt, gas_update_factor = 1.0
 | `advanceRadiationForwardEuler`         | Stage 2 explicit: `PredictStep` with `dt * Aex_21` into `state_out`                     |
 | `advanceRadiationMidpointRK2`          | Stage 3 explicit: `AddFluxesRK2` with Shu-Osher coefficients, reading `state_inter`     |
 | `RadSystem::AddFluxesRK2`              | GPU kernel: `(1-alpha)*U0 + alpha*U1 + Aex_s1_coeff*F0 + Aex_s2_coeff*F1` for radiation |
-| `RadSystem::AddSourceTermsSingleGroup` | GPU kernel: Newton-Raphson implicit solve for single-group coupling                     |
-| `RadSystem::AddSourceTermsMultiGroup`  | GPU kernel: Newton-Raphson implicit solve for multi-group coupling                      |
+| `RadSystem::AddSourceTerms`            | GPU kernel: implicit coupling solve and flux update, single-group and multigroup        |
 | `swapRadiationState`                   | Copies radiation hyperbolic vars from `state_new` → `state_old` for next substep        |
 
 
 ### Source term interface
 
-Both `AddSourceTermsSingleGroup` and `AddSourceTermsMultiGroup` accept explicit `(dt_implicit, gas_update_factor)` parameters rather than a stage integer. The caller computes:
+`AddSourceTerms` accepts explicit `(dt_implicit, gas_update_factor)` parameters rather than a stage integer. The caller computes:
 
 - `dt_implicit = Aim_ii * dt_radiation` — the effective implicit timestep for the diagonal solve
 - `gas_update_factor = 1.0` — full update to all variables (no partial-update approximation)
@@ -173,53 +172,160 @@ This makes the mapping from Butcher tableau entries to solver calls transparent.
 
 `state_tmp1_cc` is allocated once per call to `subcycleRadiationAtLevel` (before the substep loop) and reused across substeps. It holds the complete U^(2) state after stage 2, enabling the Shu-Osher combination for gas variables in step 5 above without needing to store `g(U^(2))` separately.
 
-## Matter–radiation Newton solve
+## Matter-radiation coupling solve
 
-Each implicit stage solves, cell by cell, a coupled system whose unknowns are one scalar for the matter (the gas internal energy, or the dust temperature when gas and dust are thermally decoupled) plus one per radiation group. The group residual is conservation,
+Each implicit stage solves, cell by cell, one backward-Euler step of the energy exchange between the matter and the \\(N\_g\\) radiation groups. The group equations are solved directly and the step reduces to **one scalar equation**, which is bracketed and solved with Brent's method. The method follows the hydro3d.jl reference implementation; the code is `radiation_coupling.hpp`.
 
-<script type="math/tex; mode=display">
-F_g = E_g - E_{0,g} - R_g - \mathrm{Src}_g \, ,
-</script>
+### Reduction to one equation
 
-and the group unknown is tied to \\(E\_g\\) by the definition of the exchange term,
+The step, of length \\(\Delta t\\) = `dt_implicit`, covers the [energy exchange with the matter](radiation_hydrodynamics.md#energy-exchange-with-the-matter), for the two dust models defined there. The external radiation source \\(S\_g\\) and the \\(v/c\\) work term \\(W\_g\\), which is lagged across the outer iteration, are held fixed over the step and folded into the old state,
 
 <script type="math/tex; mode=display">
-R_g = \left( \frac{4 \pi B_g}{c} - \frac{E_g}{(\kappa_P/\kappa_E)_g} \right) \tau_g + w_g \, ,
+\mathrm{rad0}_g = E_g^n + S_g + W_g \, , \qquad \mathrm{gas0} = E_{\rm gas}^n - \frac{c}{\hat c} \sum_g W_g \, ,
 </script>
 
-with \\(\tau\_g = \Delta t\\, \rho\\, \kappa\_{P,g}\\, \hat c\\) the optical depth across the step and \\(w\_g\\) the work term. Two properties of this system are easy to get wrong and are worth stating.
+and the net emission is written as \\(Q\_g = c \\, (\varepsilon\_g - \alpha\_g E\_g)\\), with the emission and absorption coefficients \\(\varepsilon\_g = 4 \pi \chi\_{0B,g} B\_g / c\\) and \\(\alpha\_g = \chi\_{0E,g}\\) (\\(\chi\_{0P}\\) and \\(\chi\_{0E}\\) for one group; \\(\chi = \rho \kappa\\)) evaluated at the matter temperature. On the single-group `beta_order >= 2` path, \\(\Delta t \\, \hat c\\) is multiplied by the Lorentz factor.
 
-### Group Planck temperature derivative
-
-The Jacobian entry \\(\partial F\_g / \partial T\\) requires the temperature derivative of the group-integrated Planck function \\(a T^4 f\_g(T)\\), and **both** terms of the product rule matter:
+**One-temperature model.** The unknowns are \\(E\_{\rm gas}\\) and the \\(N\_g\\) group energies; the gas temperature \\(T\\) follows from \\(E\_{\rm gas}\\) through the equation of state. The backward-Euler step is
 
 <script type="math/tex; mode=display">
-\frac{\mathrm{d}}{\mathrm{d}T} \left[ a T^4 f_g(T) \right] = 4 a T^3 f_g + a T^4 \frac{\mathrm{d} f_g}{\mathrm{d}T} \, .
+\begin{aligned}
+E_g - \mathrm{rad0}_g &= \Delta t \, \hat c \left[ \varepsilon_g(T) - \alpha_g(T) \, E_g \right] , \qquad g = 1 \ldots N_g \, , \\[4pt]
+E_{\rm gas} - \mathrm{gas0} &= - \frac{c}{\hat c} \sum_g \left( E_g - \mathrm{rad0}_g \right) .
+\end{aligned}
 </script>
 
-The second term is negligible for the group that carries the spectral peak, where \\(f\_g\\) is close to constant, but it dominates for a group on the Wien tail, where \\(f\_g\\) can rise as steeply as \\(T^{20}\\). Dropping it does not change the converged answer, but it makes the Newton step too long by the same factor, and the iteration then overshoots and diverges.
-
-`ComputeThermalRadiationTempDerivativeMultiGroup` therefore evaluates the exact derivative. Integrating the kernel by parts gives a cumulative form built from the same normalized Planck integral \\(P\\) used for the energy fractions,
+No group appears in the equation of another group: the groups meet only through \\(T\\). (A term that moved energy between groups directly would break this and need a different solver.) At a fixed \\(T\\), each group equation is therefore linear in its own \\(E\_g\\) and is solved directly,
 
 <script type="math/tex; mode=display">
-D(x) \equiv \frac{15}{\pi^4} \int_0^x \frac{s^4 e^s}{(e^s - 1)^2} \, \mathrm{d}s = 4 P(x) - \frac{15}{\pi^4} \frac{x^4}{e^x - 1} \, ,
+E_g(T) = \frac{\mathrm{rad0}_g + \Delta t \, \hat c \, \varepsilon_g(T)}{1 + \Delta t \, \hat c \, \alpha_g(T)} \, ,
 </script>
 
-so that \\(\mathrm{d}(4 \pi B\_g / c) / \mathrm{d}T = a T^3 \left[ D(x\_{g+1}) - D(x\_g) \right]\\) with \\(x = h \nu / (k T)\\). The cost is one extra term per group boundary, and \\(D(\infty) = 4\\) recovers \\(\mathrm{d}(a T^4)/\mathrm{d}T\\).
+a weighted mean of the energy the group starts from and its equilibrium value \\(\varepsilon\_g / \alpha\_g\\), with weights \\(1\\) and \\(\Delta t \\, \hat c \\, \alpha\_g\\), the optical depth of the step. The stiffness of an optically thick group, \\(\Delta t \\, \hat c \\, \alpha\_g \gg 1\\), is handled exactly by this formula, and a transparent group keeps \\(\mathrm{rad0}\_g\\). Substituting \\(E\_g(T(E\_{\rm gas}))\\) into the gas equation leaves one equation in one unknown,
 
-### Choice of per-group unknown
+<script type="math/tex; mode=display">
+G(E_{\rm gas}) \equiv E_{\rm gas} - \mathrm{gas0} + \frac{c}{\hat c} \sum_g \left[ E_g\big(T(E_{\rm gas})\big) - \mathrm{rad0}_g \right] = 0 \, ,
+</script>
 
-\\(E\_g\\) and \\(R\_g\\) are affinely related, so either may serve as the unknown and Newton takes the same steps in exact arithmetic. Round-off is not invariant, however: whichever quantity is carried between iterations keeps full relative precision, and the other inherits the error of the map. The two directions fail in opposite regimes.
+which states that the total energy \\(E\_{\rm gas} + (c / \hat c) \sum\_g E\_g\\) is the same after the step as before it.
 
-- With \\(R\_g\\) as the unknown, \\(E\_g = (\kappa\_P/\kappa\_E)\_g \left( 4 \pi B\_g / c - (R\_g - w\_g)/\tau\_g \right)\\). For \\(\tau\_g \ll 1\\) the two terms agree to within a factor \\(\tau\_g\\), so an **optically thin** group loses its leading digits.
-- With \\(E\_g\\) as the unknown, \\(R\_g\\) comes from the definition above. That difference cancels when \\(E\_g / (\kappa\_P/\kappa\_E)\_g\\) approaches \\(4 \pi B\_g / c\\), which is the **optically thick**, near-equilibrium case.
+**Two-temperature model.** The unknowns are \\(E\_{\rm gas}\\), the group energies, and \\(T\_d\\). With the collisional rate \\(\Lambda\_{\rm gd}(T, T\_d) = K \\, T^{1/2} (T - T\_d)\\), \\(K = k\_{\rm gd} \\, n\_{\rm H}^2\\) and \\(k\_{\rm gd}\\) the input `radiation.dust_gas_interaction_coeff`, the backward-Euler step consists of the group equations, the dust energy balance, and the gas equation,
 
-The solver therefore switches per group on \\(\tau\_g\\), at `newton_erad_base_tau_threshold` (currently 1): thin groups are based on \\(E\_g\\), thick groups on \\(R\_g\\). Rebasing a group scales its Jacobian column by \\(\mathrm{d}R\_g/\mathrm{d}E\_g = -\tau\_g / (\kappa\_P/\kappa\_E)\_g\\), changes \\(\partial F\_g / \partial x\\) (the partial derivative at fixed \\(E\_g\\) is not the one at fixed \\(R\_g\\)), and adds a term to \\(\partial F\_0 / \partial x\\), since \\(R\_g\\) now varies with the matter variable. This is done by `RebaseThinGroupsOntoErad`.
+<script type="math/tex; mode=display">
+\begin{aligned}
+E_g - \mathrm{rad0}_g &= \Delta t \, \hat c \left[ \varepsilon_g(T_d) - \alpha_g(T_d) \, E_g \right] , \qquad g = 1 \ldots N_g \, , \\[4pt]
+\frac{c}{\hat c} \sum_g \left( E_g - \mathrm{rad0}_g \right) &= \Delta t \, \Lambda_{\rm gd}(T, T_d) \, , \\[4pt]
+E_{\rm gas} - \mathrm{gas0} &= - \Delta t \, \Lambda_{\rm gd}(T, T_d) \, .
+\end{aligned}
+</script>
 
-Rebasing is applied in `SolveGasRadiationEnergyExchange` and in the decoupled branch of `SolveGasDustRadiationEnergyExchange`. It is **not** applied when gas and dust are thermally coupled, because there \\(T\_d\\) is itself a function of \\(\sum\_g R\_g\\) and `ComputeJacobianForGasAndDust` has already eliminated that coupling in the \\(R\_g\\) unknowns, so the columns are no longer a plain change of variable away from the \\(E\_g\\) ones.
+Now the groups meet only through \\(T\_d\\), so at a fixed \\(T\_d\\) the group equations are again linear and give \\(E\_g(T\_d)\\) by the formula above with \\(T\\) replaced by \\(T\_d\\). Adding the last two equations gives the gas energy directly as well, from energy conservation,
 
-Groups that are still based on \\(R\_g\\) keep a round-off floor on the convergence test: their residual cannot be resolved below \\(\varepsilon \times 4 \pi B\_g / c\\), so a purely relative tolerance would be unreachable. Rebased groups use the round-off of the residual's own terms instead.
+<script type="math/tex; mode=display">
+E_{\rm gas}(T_d) = \mathrm{gas0} - \frac{c}{\hat c} \sum_g \left[ E_g(T_d) - \mathrm{rad0}_g \right] ,
+</script>
+
+and with it the gas temperature \\(T(T\_d)\\). What is left is the dust energy balance, one equation in one unknown,
+
+<script type="math/tex; mode=display">
+H(T_d) \equiv \frac{c}{\hat c} \sum_g \left[ E_g(T_d) - \mathrm{rad0}_g \right] - \Delta t \, \Lambda_{\rm gd}\big(T(T_d), T_d\big) = 0 \, .
+</script>
+
+Total energy is conserved at every trial \\(T\_d\\), not only at the root. At \\(K = 0\\) the gas energy stays at \\(\mathrm{gas0}\\) and \\(H = 0\\) is the radiative equilibrium of the dust; as \\(K \to \infty\\), \\(T\_d \to T\\) and \\(H = 0\\) becomes \\(G = 0\\) of the one-temperature model.
+
+### Comparison with the Newton-Raphson iteration
+
+The inner solve differs from the Newton-Raphson iteration of [@Howell_2003], used in [@Wibking_2022], [@He_2024], and [@He_2024b], which iterates on all \\(1 + N\_g\\) energy variables and tests convergence on the residuals of their equations:
+
+- **The group energies are eliminated exactly** rather than iterated on. A Newton step linearises them about the current iterate, and in an optically thick cell far from equilibrium the first step, taken about the starting group energies, can point away from the root.
+- **The root is bracketed before it is refined**, so the solve cannot diverge. Marching from the old state also selects the root connected to it when a steep opacity law gives the step more than one.
+- **Convergence is judged on the unknown, not on a residual.** A group residual of the form \\(\tau\_g (4 \pi B\_g / c - E\_g)\\), with \\(\tau\_g\\) the optical depth of the step, carries a round-off error of about \\(\epsilon \\, \tau\_g\\) times the cell's energy (\\(\epsilon\\) is the machine epsilon), so a residual test at \\(10^{-11}\\) cannot be met once \\(\tau\_g \gtrsim 10^5\\). A relative tolerance on the gas energy means the same at every optical depth.
+- **No Jacobian and no linear solve.** Each evaluation of the scalar equation costs one Planck integral per group.
+
+### Bracket, root finder, tolerance
+
+Both equations increase with their unknown except where a steep opacity law makes them non-monotone, in which case the step can have several roots. The bracket is therefore built by **marching outward from the old state** (\\(E\_{\rm gas}^0\\), or the start-of-step gas temperature for \\(T\_d\\)) by factors of two in the direction the sign of the residual indicates, which isolates the root continuously connected to where the cell started. The march in \\(E\_{\rm gas}\\) never goes below \\(E\_{\rm min} = E\_{\rm int}(\rho, T\_{\rm floor})\\): if it reaches \\(E\_{\rm min}\\) without a sign change, the root lies below the admissible range, the gas is clamped to the floor and the groups take the closed form at \\(T\_{\rm floor}\\), the cell counts as converged, and the energy \\(G(E\_{\rm min}) > 0\\) is created by the temperature floor, as any floor does, with no threshold on that amount. With a zero temperature floor (every problem in `UnitSystem::CONSTANTS`) \\(E\_{\rm min} = 0\\), and the march instead floors at round-off of the initial gas energy, \\(16 \\, \epsilon \\, E\_{\rm gas}^0\\) with \\(\epsilon\\) the machine epsilon, so that it still ends; probing exactly \\(E = 0\\) would evaluate the Planck function at \\(T = 0\\). This is routine, not pathological: a transparent, radiation-dominated cell whose gas sits at the floor hits this every step. The march in \\(T\_d\\) is not stopped at \\(T\_{\rm floor}\\), which is a floor on the gas: dust in a weak field is colder than it. It stops instead at \\(T\_d^{\rm min} = (E\_{\rm floor} / a\_R)^{1/4}\\), with \\(E\_{\rm floor}\\) the floor of a group: every emitting group emits at least \\(E\_{\rm floor}\\), so below \\(T\_d^{\rm min}\\) the group energies, and the gas energy that follows from conservation, no longer depend on \\(T\_d\\). If \\(H\\) is still positive there, the dust emits more than it absorbs even at the emission floor. The cell then takes the state at \\(T\_d^{\rm min}\\) and counts as converged, with the gas paying for the floor emission as it does for any lift to the floor. This is the state at the root whenever the root lies on that plateau, and it is routine where the radiation sits at its floor and \\(K = 0\\). Only an upward march that exhausts its 200 doublings, or a march that meets a non-finite residual, is reported unconverged, and the run aborts.
+
+The root is found with `quokka::math::brent_solve` (Brent's method with a minimum step; see `bracketing_root_finding.hpp`), which stops when the bracket is narrow relative to the unknown: \\(|hi - lo| \le \mathrm{tol} \\, \min(|lo|, |hi|)\\) with `tol` the input `radiation.iteration_tolerance`. For an ideal gas the unknown \\(E\_{\rm gas} = c\_V T\\) makes this a relative tolerance on the gas temperature. With dust the promise is on the gas energy across Brent's final bracket in \\(T\_d\\), \\(|E\_{\rm gas}(T\_d^-) - E\_{\rm gas}(T\_d^+)| \le \max(\mathrm{tol}\\,|E\_{\rm gas}|,\\ 4\varepsilon\\, e\_{\rm r})\\), with \\(e\_{\rm r} = |E\_{\rm gas}^0 - (c/\hat c)\sum\_g W\_g| + (c/\hat c)\sum\_g |E\_g - \mathrm{rad0}\_g|\\) the scale of the round-off in the gas energy, because at small \\(K\\) the gas energy follows from conservation and its error is the \\(T\_d\\) error times \\((c/\hat c)\sum\_g E\_g / E\_{\rm gas}\\) (about \\(10^5\\) in `DTypeFront1D`); if the test fails, Brent is repeated on its own final bracket with the \\(T\_d\\) tolerance set from the measured slope, at most three times, and a bracket at the floating-point resolution of \\(T\_d\\) counts as converged. The state is taken where the line through the ends of Brent's final bracket crosses zero (`secant_point`), not at an end or the midpoint. Where Brent stops depends on round-off in the inputs, so an end or the midpoint could differ by up to the tolerance between cells that should be identical, such as the mirror halves of a symmetric problem; the crossing is within about the square of the tolerance of the root, so where Brent stopped no longer matters. With dust, the gas energy at that point is taken from the gas equation, \\(E\_{\rm gas} = E\_{\rm gas}^0 - (c/\hat c)\sum\_g W\_g - \Delta t \\, K T^{1/2} (T - T\_d)\\), solved for its own temperature \\(T(E\_{\rm gas})\\) by Newton's method, so the round-off of the conservation form never enters it; the conservation form is kept only where Newton does not converge (see [Round-off error of the returned state](#round-off-error-of-the-returned-state)). At \\(K = 0\\) this leaves the gas energy exactly unchanged. Convergence is judged on the unknown, never on the residual: \\(H\\) in particular multiplies the round-off in \\(T - T\_d\\) by \\(\Delta t K T^{1/2}\\) and cannot be tested directly. The conservation error of a step is then at most about \\(\mathrm{d}G/\mathrm{d}E\_{\rm gas}\\) times the tolerance times the gas energy. Over a 240-cell sweep taken from hydro3d.jl, spanning three opacity laws and sixteen decades of optical depth the solve needs about 10 evaluations of the equation per cell without dust and about 14 with dust, and fails on none; `RadCouplingUnitTests` reproduces that sweep and the dust sweep, and adds a CGS sweep of the two-temperature model over 6912 cells at the conditions of a dusty D-type ionization front (reduced speed of light \\(c/1000\\), gas from the 10 K floor to photoheated, radiation from the floor up, \\(k\_{\rm gd}\\) from zero to \\(10^8\\) times the default, lagged work terms), in which every cell converges. `radiation.print_iteration_counts` reports the mean and maximum number of evaluations per solve.
+
+### Round-off error of the returned state
+
+The solve returns the root of a scalar residual, \\(G(E\_{\rm gas})\\) or \\(H(T\_d)\\), evaluated in double precision, and then the group energies in closed form at that root. Because every quantity is computed from the inputs and the root, not from differences of iterates, the round-off error of each returned quantity can be bounded from two things: the absolute round-off of the residual, and the slope of the residual at the root. This section derives those bounds and reports how tight they are, for opacities \\(\kappa\_\nu = \kappa\_0 (\nu / \nu\_0)^p (T / T\_0)^\beta\\) with \\(-4 < p \le 2\\) and \\(-3 \le \beta \le 2\\). It answers the question of how the error in the one solved variable reaches the others: in the notation of [@Skinner_2013] (their Eq. 10), the amplification factor between the gas energy and the radiation energy is written out and shown to be bounded.
+
+**Notation.** \\(\varepsilon = 2^{-52}\\) is the machine epsilon. With \\(\tau\_g = \Delta t \\, \hat c \\, \alpha\_g\\) the optical depth of the step in group \\(g\\), the energy the gas side sees moving in each direction over the step is
+
+<script type="math/tex; mode=display">
+A_g = \frac{c}{\hat c} \, \frac{\tau_g \, \alpha_g \, \mathrm{rad0}_g}{1 + \tau_g \, \alpha_g} \quad \text{(absorbed)}, \qquad
+M_g = \frac{c}{\hat c} \, \frac{\tau_g \, \hat\varepsilon_g}{1 + \tau_g \, \alpha_g} \quad \text{(emitted)}, \qquad
+R = \sum_g \left( A_g + M_g \right) ,
+</script>
+
+and \\(R\\) is the gross exchange of the step. Here \\(\hat\varepsilon\_g = \rho \kappa\_{P,g} \\, a\_R T^4 \\, Y\_g \ge \varepsilon\_g\\), with \\(Y\_g\\) the cumulative Planck fraction below the upper edge of the group: the group's Planck fraction \\(f\_g\\) is computed as the difference of the cumulative integrals at its two edges, so the emission coefficient \\(\varepsilon\_g = \rho \kappa\_{P,g} \\, a\_R T^4 f\_g\\) carries an absolute round-off of \\(\varepsilon \\, \hat\varepsilon\_g\\), not \\(\varepsilon \\, \varepsilon\_g\\). (For a group beyond the Wien cut-off, where the cumulative integral is exactly one, this is conservative.) The net exchange \\(\Delta\_g = E\_g - \mathrm{rad0}\_g\\) is what enters the equations; the round-off is set by the gross terms.
+
+The temperature dependence of the coefficients enters through their logarithmic derivatives at the root,
+
+<script type="math/tex; mode=display">
+\frac{\mathrm{d} \ln \varepsilon_g}{\mathrm{d} \ln T} = q_g + p_{P,g} \, , \qquad
+\frac{\mathrm{d} \ln \alpha_g}{\mathrm{d} \ln T} = p_{E,g} \, , \qquad
+q_g \equiv \frac{\mathrm{d} \ln B_g}{\mathrm{d} \ln T} \ge 1 \, ,
+</script>
+
+where \\(q\_g\\) is the exponent of the group's Planck integral (1 in the Rayleigh-Jeans limit, 4 for the whole spectrum, \\(h\nu / k T\\) deep in the Wien tail) and \\(p\_{P,g}\\), \\(p\_{E,g}\\) are the exponents of the group mean opacities. For \\(\kappa\_\nu \propto \nu^p T^\beta\\) under the fixed-slope piecewise power-law model the frequency dependence is integrated out of the group means and the temperature factor is common to every group, so \\(p\_{P,g} = p\_{E,g} = \beta\\), independent of \\(p\\); \\(p\\) sets how the optical depths of the groups are spread (by \\(10^{3p}\\) over a three-decade grid), which is what the gross exchange \\(R\\) and the residual's slope feel. For a grey opacity equal to the Planck mean of \\(\nu^p\\) over the whole spectrum, \\(q = 4\\) and \\(p\_P = p\_E = p\\). The emission of a group increases with the temperature where \\(q\_g + \beta > 0\\): for \\(\beta \ge -1\\) in every group, and for the grey Planck mean whenever \\(p > -4\\), which is the role of that limit; for \\(-3 \le \beta < -1\\) a Rayleigh-Jeans group (\\(q\_g \to 1\\)) emits less as it warms, but the total emission over a grid that covers the Planck peak still rises as \\(T^{4 + \beta}\\). The upper limits \\(p, \beta \le 2\\) bound the sensitivities below by \\(q\_g + 2|\beta| \le q\_g + 4\\), or \\(4 + p + |p| \le 8\\) for the grey mean.
+
+**Gas temperature, one-temperature model.** Each term of \\(G = (E\_{\rm gas} - \mathrm{gas0}) + (c/\hat c)\sum\_g \Delta\_g\\) is computed to a relative precision of a few \\(\varepsilon\\), so the absolute round-off of \\(G\\) is \\(\delta G \approx \varepsilon \\, (E\_{\rm gas} + |\mathrm{gas0}| + R)\\). The computed residual therefore vanishes somewhere within \\(\delta G / G'\\) of the true root, with
+
+<script type="math/tex; mode=display">
+G' = 1 + S \, , \qquad
+S = \frac{c}{\hat c} \, \frac{1}{c_V} \sum_g \frac{\tau_g \left[ \varepsilon_g' \, (1 + \tau_g \alpha_g) - \alpha_g' \, (\mathrm{rad0}_g + \tau_g \varepsilon_g) \right]}{(1 + \tau_g \alpha_g)^2}
+= \sum_g \frac{(q_g + p_{P,g}) \, M_g \, (1 + \tau_g \alpha_g) - p_{E,g} \left( A_g + \tau_g \alpha_g M_g \right)}{E_{\rm gas} \, (1 + \tau_g \alpha_g)} \, ,
+</script>
+
+the second form for an ideal gas (\\(c\_V T = E\_{\rm gas}\\)) and with \\(M\_g\\) built from \\(\varepsilon\_g\\) rather than \\(\hat\varepsilon\_g\\). Brent's method stops only when the bracket is narrower than the tolerance, and the chord crossing is within the square of the tolerance of the root, so the returned gas energy is in error by
+
+<script type="math/tex; mode=display">
+\frac{|\delta E_{\rm gas}|}{E_{\rm gas}} = \frac{|\delta T|}{T} \lesssim \varepsilon \, (1 + \kappa_T) \, , \qquad
+\kappa_T \equiv \frac{|\mathrm{gas0}| + R}{E_{\rm gas} \, |1 + S|} \, .
+</script>
+
+\\(\kappa\_T\\) is the condition number of the step: changing any input by one ulp moves the exact root by the same amount, so no solver can do better. It is large only where the gross exchange is much larger than the gas energy *and* the residual is flat: \\(R \gg E\_{\rm gas}\\) with \\(S \lesssim 1\\). With \\(\beta = 0\\) and \\(q\_g \ge 1\\), \\(S \ge \sum\_g M\_g / E\_{\rm gas}\\), so a large emitted term always steepens the residual, and only a large absorbed term with a small emitted one can leave \\(\kappa\_T\\) large; at the root the gas has then absorbed that energy, \\(E\_{\rm gas} \gtrsim \sum\_g A\_g\\), and \\(\kappa\_T\\) is again of order one. A temperature exponent \\(\beta < 0\\) adds \\(|\beta| A\_g\\) to the slope (a cooler gas absorbs more, which pulls it back) and subtracts \\(|\beta| M\_g\\) from it; \\(\beta > 0\\) does the opposite, and it is the \\(-\beta A\_g\\) term that can make the residual non-monotone when the radiation is far above the Planck value. The example of a cell with \\(\kappa\_T \sim 10^{16}\\) in the review of this method needed \\(\kappa\_P \propto T^{-4}\\), i.e. \\(q + p\_P = 0\\), exactly the limit \\(p \to -4\\) excluded here. Near a fold of a non-monotone residual, which a temperature-dependent opacity with \\(p\_P > 0\\) can produce, \\(1 + S \to 0\\) and the bound diverges; there the branch itself is decided by rounding, and no bound on the root applies.
+
+**Group energies.** Each \\(E\_g = (\mathrm{rad0}\_g + \tau\_g \varepsilon\_g) / (1 + \tau\_g \alpha\_g)\\) is a single division of two sums of positive terms, so its own arithmetic adds at most a few \\(\varepsilon\\); the coefficient round-off adds \\(\varepsilon \\, \tau\_g \hat\varepsilon\_g / [(1 + \tau\_g \alpha\_g) E\_g] = \varepsilon \\, (\hat c / c) M\_g / E\_g\\); and the temperature error propagates with the logarithmic sensitivity of the closed form,
+
+<script type="math/tex; mode=display">
+\frac{|\delta E_g|}{E_g} \lesssim 4 \varepsilon + \varepsilon \, \frac{\hat c}{c} \frac{M_g}{E_g} + \sigma_g \, \frac{|\delta T_m|}{T_m} \, , \qquad
+\sigma_g = (q_g + p_{P,g}) \, \frac{\tau_g \varepsilon_g}{\mathrm{rad0}_g + \tau_g \varepsilon_g} + |p_{E,g}| \, \frac{\tau_g \alpha_g}{1 + \tau_g \alpha_g} \le q_g + p_{P,g} + |p_{E,g}| \, ,
+</script>
+
+with \\(T\_m\\) the matter temperature the radiation couples at. This is the amplification factor of [@Skinner_2013]: the error of the group energy is the error of the temperature times at most the Planck exponent of the group plus the opacity exponents, which for the opacities considered here is a number of order one to a few tens (the Wien-tail groups), never a power of the energy ratio. Where the temperature error is itself a few \\(\varepsilon\\), so is the error of every group energy, up to that factor.
+
+**Two-temperature model.** The root is \\(T\_d\\), and the same argument applies to \\(H\\). Writing \\(\Lambda' = \Delta t K T^{1/2}\\) for the slope of the collisional term in \\(T\_d\\) and \\(\Lambda\_T = \Delta t K (1.5 \\, T^{1/2} - 0.5 \\, T\_d / T^{1/2})\\) for its slope in \\(T\\),
+
+<script type="math/tex; mode=display">
+\delta H \approx \varepsilon \left[ R + \Lambda' (T + T_d) \right] + |\Lambda_T| \, \frac{\varepsilon \, (|\mathrm{gas0}| + R)}{c_V} \, , \qquad
+H' = \frac{c}{\hat c} \sum_g \frac{\mathrm{d} \Delta_g}{\mathrm{d} T_d} \left( 1 + \frac{\Lambda_T}{c_V} \right) + \Lambda' \, , \qquad
+\frac{|\delta T_d|}{T_d} \lesssim \frac{\delta H}{|H'| \, T_d} \, ,
+</script>
+
+where the last term of \\(\delta H\\) is the round-off of the gas temperature that the collisional term is evaluated at when the gas energy comes from conservation. The group energies follow from \\(T\_d\\) exactly as above. The gas energy is where the choice of formula matters. From conservation, \\(E\_{\rm gas} = \mathrm{gas0} - (c/\hat c) \sum\_g \Delta\_g\\), its error is \\(\varepsilon (|\mathrm{gas0}| + R)\\) plus the propagated \\(T\_d\\) error, and in a radiation-dominated cell \\(R / E\_{\rm gas}\\) reaches \\(10^{17}\\): the gas energy is then lost entirely. From the gas equation, \\(F(E\_{\rm gas}) \equiv E\_{\rm gas} - \mathrm{gas0} + \Lambda' (T - T\_d) = 0\\) solved for its own temperature, the error is
+
+<script type="math/tex; mode=display">
+|\delta E_{\rm gas}| \lesssim \frac{\varepsilon \left[ |\mathrm{gas0}| + E_{\rm gas} + \Lambda' (T + T_d) \right] + \Lambda' \, |\delta T_d|}{F'} \, , \qquad F' = 1 + \frac{\Lambda_T}{c_V} \, .
+</script>
+
+The round-off of the radiation exchange reaches the gas only through \\(\Lambda' \delta T\_d \le \Lambda' \delta H / H'\\), and since \\(H' \ge \Lambda'\\) this is at most the error of the conservation form; in the strongly coupled limit \\(H' \approx (c/\hat c) \sum\_g \Delta\_g' \\, \Lambda\_T / c\_V\\) and the gas error reduces to the one-temperature bound \\(\varepsilon (|\mathrm{gas0}| + R) / (1 + S)\\), as it should. So the code always solves the gas equation, by Newton's method on \\(F\\), and keeps the conservation form only where Newton does not converge: \\(F' \le 0\\), which needs a strongly coupled gas with dust more than three times hotter, so that the root lies below \\(T\_d / 3\\) where \\(F\\) decreases with \\(E\_{\rm gas}\\). Newton starts from \\(\mathrm{gas0}\\), which is close to the weakly coupled root, and if \\(F' \le 0\\) there, from the dust temperature, which is close to the strongly coupled root. At \\(K = 0\\) the gas equation gives \\(E\_{\rm gas} = \mathrm{gas0}\\) exactly. (An earlier version of this solve chose between the two forms from an estimate of their round-off that counted only the net exchange \\(\sum\_g |\Delta\_g|\\), not the gross one, and iterated the gas equation as a fixed point; the sweep below found gas-temperature errors of up to \\(10^{-3}\\) from both, and led to the present form.)
+
+**Measurements.** `RadCouplingUnitTests` (`TestRoundoffBounds`) checks the three bounds cell by cell against a reference solution computed in long double on the host: the same march and a bisection to a relative width of \\(10^{-18}\\), using the code's own double-precision coefficients evaluated on the device at the trial temperature rounded to double, so that the reference isolates the arithmetic of the solve and is exact to one ulp of the trial temperature; with dust, the reference gas energy is taken from the gas equation by Newton's method in long double. The sweep is in CGS with \\(\hat c = c / 1000\\), six half-decade groups from 0.01 eV to 10 eV, \\(\kappa\_\nu = \kappa\_0 (\nu / 1\\,{\rm eV})^p (T / 100\\,{\rm K})^\beta\\) for \\(p \in \\{-3.9, -3, -2, -1, 0, 1, 2\\}\\) and \\(\beta \in \\{-3, -1.5, 0, 1, 2\\}\\), \\(\rho \kappa\_0 \hat c \Delta t\\) from \\(10^{-4}\\) to \\(10^8\\), \\(n\_{\rm H}\\) from \\(10^{-2}\\) to \\(10^4\\) cm\\(^{-3}\\), gas from 10 K to \\(10^4\\) K, radiation from 0.1 to 100 times the gas temperature, and \\(k\_{\rm gd}\\) from zero to \\(10^8\\) times the default: 14700 cells without dust and 58800 with it, of which the cells clamped at a floor by either side are excluded (3882, all in the two-temperature model). Cells near a fold of the residual, where its slope cancels to below a tenth of the magnitude of its terms, would be excluded as well, and cells where the solver and the reference followed different roots would be counted; neither occurs in this sweep. Over every \\(p\\) and \\(\beta\\), the measured errors are within the following factors of the bounds:
+
+| quantity | measured error, max | bound exceeded by at most | cells |
+|---|---|---|---|
+| \\(T\\), one-temperature model | \\(1.1 \times 10^{-15}\\) (5 ulp) | 1.9 | 14700 |
+| \\(E\_g\\), one-temperature model | \\(9.2 \times 10^{-12}\\) | 1.7 | 14700 |
+| \\(T\\), two-temperature model | \\(1.3 \times 10^{-15}\\) (6 ulp) | 2.0 | 54918 |
+| \\(T\_d\\) | \\(1.1 \times 10^{-15}\\) | 8.0 | 54918 |
+| \\(E\_g\\), two-temperature model | \\(8.9 \times 10^{-12}\\) | 2.4 | 54918 |
+
+The largest group-energy errors are in groups holding a small fraction of the Planck function (\\(\sigma\_g\\) up to 117 for \\(\beta = 2\\) in the Wien tail, and the coefficient round-off term), never in the gas temperature, which is within 6 ulp in every cell of the sweep. The measured \\(\kappa\_T\\) stays below 2 for \\(p \le 0\\) at every \\(\beta\\); for \\(p > 0\\) the conservative coefficient term raises it to \\(4 \times 10^4\\) while the error stays at a few ulp. The test asserts the ratios with a margin (4, 8 and 16 for \\(T\\), \\(E\_g\\) and \\(T\_d\\)), so a future change to the solve that loses accuracy in any of the three quantities fails it.
 
 ## Equivalence with the previous implementation (single-group)
 
-Before this refactor the code used a `gas_update_factor = IMEX_a32 = 0.5` trick: stage 2 applied only half the gas update, avoiding the need to store U^(2). The new implementation applies the full gas update at stage 2, then applies the Shu-Osher combination `0.5*gas_n + 0.5*gas_stage2` before stage 3's implicit solve. The starting point for the stage 3 Newton-Raphson is identical in both cases, so for single-group radiation the numerical results are algebraically equivalent. For multi-group radiation the old `gas_update_factor` also entered the work-term iteration inside `UpdateFlux`; the new implementation with `gas_update_factor = 1.0` is the mathematically correct IMEX formulation.
+Before this refactor the code used a `gas_update_factor = IMEX_a32 = 0.5` trick: stage 2 applied only half the gas update, avoiding the need to store U^(2). The new implementation applies the full gas update at stage 2, then applies the Shu-Osher combination `0.5*gas_n + 0.5*gas_stage2` before stage 3's implicit solve. The starting point for the stage 3 implicit solve is identical in both cases, so for single-group radiation the numerical results are algebraically equivalent. For multi-group radiation the old `gas_update_factor` also entered the work-term iteration inside `UpdateFlux`; the new implementation with `gas_update_factor = 1.0` is the mathematically correct IMEX formulation.
