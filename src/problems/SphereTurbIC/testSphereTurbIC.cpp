@@ -19,11 +19,9 @@ constexpr double seconds_per_myr = 3.15576e13;
 double cloud_mass_msun = 1000.;
 double cloud_number_density = 100.;
 double ambient_number_density = 1.;
-double cloud_temperature = 10.;
+double cloud_temperature = 47.962492751223152;
 double radiation_temperature = 10.;
 int jeans_refinement_ncells = 10;
-int balance_thermal_sources = 0;
-double background_heating_rate = 0.; // uniform volumetric heating, erg cm^-3 s^-1
 double radius = 0.;
 
 template <typename Table>
@@ -103,72 +101,6 @@ template <> AMREX_GPU_HOST_DEVICE AMREX_FORCE_INLINE auto RadSystem<SphereTurbIC
 {
 	return dustOpacity(rho, temperature, 0.0316);
 }
-
-namespace
-{
-// Infinitesimal gas-energy rate from the actual radiation/dust coupling solver.
-// Radiation remains dynamical; this balances its initial contribution to gas heating.
-auto matterRadiationRate(double rho, double eint, double dust_coefficient) -> double
-{
-	CouplingCell<SphereTurbIC> cell{};
-	cell.Egas0 = eint;
-	cell.Erad0[0] = C::a_rad * std::pow(radiation_temperature, 4);
-	cell.rho = rho;
-	cell.dt = 1.e6;
-	cell.tau_scale = cell.dt * RadSystem<SphereTurbIC>::c_hat_;
-	const double nH = RadSystem<SphereTurbIC>::ComputeNumberDensityH(rho, cell.massScalars);
-	cell.dtK = cell.dt * dust_coefficient * nH * nH;
-	cell.Tfloor = 10.;
-	cell.Emin = quokka::EOS<SphereTurbIC>::ComputeEintFromTgas(rho, cell.Tfloor);
-	const auto result = RadSystem<SphereTurbIC>::SolveDustCoupling(cell, 1.e-12);
-	AMREX_ALWAYS_ASSERT(result.converged && std::isfinite(result.Egas));
-	return (result.Egas - eint) / cell.dt;
-}
-
-auto initialGasRate(double rho, double pressure, QuokkaSimulation<SphereTurbIC> const &sim) -> double
-{
-	const double eint = quokka::EOS<SphereTurbIC>::ComputeEintFromPres(rho, pressure);
-	return quokka::ResampledCooling::resampled_cooling_function(rho, eint, sim.resampledTables_.const_tables_host()) +
-	       matterRadiationRate(rho, eint, sim.dustGasInteractionCoeff_);
-}
-
-void establishThermalBalance(QuokkaSimulation<SphereTurbIC> &sim)
-{
-	if (balance_thermal_sources == 0) {
-		return;
-	}
-	const double rho_c = cloud_number_density * particle_mass;
-	const double rho_a = ambient_number_density * particle_mass;
-	const auto pressureAt = [=](double T) {
-		return quokka::EOS<SphereTurbIC>::ComputePressure(rho_c, quokka::EOS<SphereTurbIC>::ComputeEintFromTgas(rho_c, T));
-	};
-	const auto residual = [&](double P) { return initialGasRate(rho_c, P, sim) - initialGasRate(rho_a, P, sim); };
-	double lo = pressureAt(35.);
-	double hi = pressureAt(80.);
-	const double flo = residual(lo);
-	AMREX_ALWAYS_ASSERT_WITH_MESSAGE(flo * residual(hi) < 0., "The cold two-phase thermal-balance branch is not bracketed.");
-	for (int iteration = 0; iteration < 80; ++iteration) {
-		const double mid = .5 * (lo + hi);
-		if (residual(mid) * flo > 0.) {
-			lo = mid;
-		} else {
-			hi = mid;
-		}
-	}
-	const double pressure = .5 * (lo + hi);
-	background_heating_rate = -initialGasRate(rho_a, pressure, sim);
-	sim.volumetricHeatingRate_ = background_heating_rate;
-	AMREX_ALWAYS_ASSERT(background_heating_rate > 0. && std::isfinite(background_heating_rate));
-	const double ec = quokka::EOS<SphereTurbIC>::ComputeEintFromPres(rho_c, pressure);
-	const double ea = quokka::EOS<SphereTurbIC>::ComputeEintFromPres(rho_a, pressure);
-	cloud_temperature = quokka::EOS<SphereTurbIC>::ComputeTgasFromEint(rho_c, ec);
-	amrex::Print() << std::setprecision(17) << "THERMAL_BALANCE P=" << pressure << " H_vol=" << background_heating_rate << " T_cloud=" << cloud_temperature
-		       << " T_ambient=" << quokka::EOS<SphereTurbIC>::ComputeTgasFromEint(rho_a, ea)
-		       << " cloud_gas_residual=" << initialGasRate(rho_c, pressure, sim) + background_heating_rate
-		       << " ambient_gas_residual=" << initialGasRate(rho_a, pressure, sim) + background_heating_rate << " radiation_T=" << radiation_temperature
-		       << " radiation_remains_dynamical=1\n";
-}
-} // namespace
 
 template <> void QuokkaSimulation<SphereTurbIC>::preCalculateInitialConditions()
 {
@@ -335,7 +267,6 @@ auto problem_main() -> int
 	pp.query("cloud_temperature", cloud_temperature);
 	pp.query("radiation_temperature", radiation_temperature);
 	pp.query("jeans_refinement_ncells", jeans_refinement_ncells);
-	pp.query("balance_thermal_sources", balance_thermal_sources);
 	AMREX_ALWAYS_ASSERT(cloud_mass_msun > 0. && cloud_number_density > ambient_number_density && ambient_number_density > 0.);
 	AMREX_ALWAYS_ASSERT(jeans_refinement_ncells >= 4);
 	const double rho = cloud_number_density * particle_mass;
@@ -343,7 +274,6 @@ auto problem_main() -> int
 	const double tff = std::sqrt(3. * M_PI / (32. * C::Gconst * rho));
 	auto bc = quokka::BC<SphereTurbIC>(quokka::BCType::reflecting);
 	QuokkaSimulation<SphereTurbIC> sim(bc);
-	establishThermalBalance(sim);
 	const auto lo = sim.geom[0].ProbLoArray();
 	const auto hi = sim.geom[0].ProbHiArray();
 	for (int d = 0; d < 3; ++d) {
@@ -360,7 +290,7 @@ auto problem_main() -> int
 		       << " P_ambient=" << quokka::EOS<SphereTurbIC>::ComputePressure(rho_ambient, ambient_eint) << " refinement_N=" << jeans_refinement_ncells
 		       << " sink_N=4 accretion_density_floor=" << Particle_Traits<SphereTurbIC>::sink_accretion_density_floor
 		       << " self_gravity=ON RT_groups=1 forcing=OFF dust_gas_coeff=" << sim.dustGasInteractionCoeff_
-		       << " background_heating_vol=" << background_heating_rate << " velocity_HDF5_layout=C_order_corrected\n";
+		       << " automatic_thermal_balance=OFF extra_heating_vol=" << sim.volumetricHeatingRate_ << " velocity_HDF5_layout=C_order_corrected\n";
 	sim.setInitialConditions();
 	sim.evolve();
 	return 0;

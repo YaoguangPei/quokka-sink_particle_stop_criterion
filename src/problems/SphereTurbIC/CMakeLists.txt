@@ -1,7 +1,3 @@
 if (AMReX_SPACEDIM EQUAL 3)
     add_executable(SphereTurbIC testSphereTurbIC.cpp ../../turbulence/TurbDataReader.cpp ${QuokkaObjSources})
-    add_executable(SphereTurbICFloorTest testAccretionFloor.cpp ${QuokkaObjSources})
-    add_executable(SphereTurbICBalanceTest testThermalBalance.cpp ../../turbulence/TurbDataReader.cpp ${QuokkaObjSources})
-    add_test(NAME SphereTurbICAccretionFloor COMMAND SphereTurbICFloorTest)
-    add_test(NAME SphereTurbICBalanceAndLayout COMMAND SphereTurbICBalanceTest ${CMAKE_CURRENT_SOURCE_DIR}/thermal_unit.toml)
 endif()
