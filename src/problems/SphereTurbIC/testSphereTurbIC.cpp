@@ -52,13 +52,6 @@ AMREX_GPU_HOST_DEVICE AMREX_FORCE_INLINE auto sample(Table const &field, amrex::
 	return value;
 }
 
-AMREX_GPU_HOST_DEVICE AMREX_FORCE_INLINE auto dustOpacity(double rho, double temperature, double coefficient) -> double
-{
-	const double n = rho / particle_mass;
-	const double x = amrex::min(amrex::max((n - 50.) / 40., 0.), 1.);
-	const double t = amrex::min(amrex::max(temperature, 1.), 150.) / 10.;
-	return coefficient * x * x * (3. - 2. * x) * t * t;
-}
 } // namespace
 
 template <> struct quokka::EOS_Traits<SphereTurbIC> {
@@ -93,13 +86,11 @@ template <> struct SimulationData<SphereTurbIC> {
 	amrex::GpuArray<double, 3> velocity_mean{};
 	double velocity_scale = 0.;
 };
-template <> AMREX_GPU_HOST_DEVICE AMREX_FORCE_INLINE auto RadSystem<SphereTurbIC>::ComputePlanckOpacity(double rho, double temperature) -> amrex::Real
+// Fixed grey mass opacity [cm^2/g of gas]; energy and flux means default to this value.
+template <>
+AMREX_GPU_HOST_DEVICE AMREX_FORCE_INLINE auto RadSystem<SphereTurbIC>::ComputePlanckOpacity(double /*rho*/, double /*temperature*/) -> amrex::Real
 {
-	return dustOpacity(rho, temperature, 0.1);
-}
-template <> AMREX_GPU_HOST_DEVICE AMREX_FORCE_INLINE auto RadSystem<SphereTurbIC>::ComputeFluxMeanOpacity(double rho, double temperature) -> amrex::Real
-{
-	return dustOpacity(rho, temperature, 0.0316);
+	return 2.0;
 }
 
 template <> void QuokkaSimulation<SphereTurbIC>::preCalculateInitialConditions()
@@ -290,6 +281,7 @@ auto problem_main() -> int
 		       << " P_ambient=" << quokka::EOS<SphereTurbIC>::ComputePressure(rho_ambient, ambient_eint) << " refinement_N=" << jeans_refinement_ncells
 		       << " sink_N=4 accretion_density_floor=" << Particle_Traits<SphereTurbIC>::sink_accretion_density_floor
 		       << " self_gravity=ON RT_groups=1 forcing=OFF dust_gas_coeff=" << sim.dustGasInteractionCoeff_
+		       << " opacity_cm2_per_g=2"
 		       << " automatic_thermal_balance=OFF extra_heating_vol=" << sim.volumetricHeatingRate_ << " velocity_HDF5_layout=C_order_corrected\n";
 	sim.setInitialConditions();
 	sim.evolve();

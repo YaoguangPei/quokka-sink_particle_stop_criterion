@@ -46,6 +46,7 @@ particles.disable_particle_drift = false
 particles.sink_accretion_jeans_floor_fraction = 0.0
 particles.sink_creation_require_bound = false
 particles.sink_creation_bound_audit = false
+# Fixed grey opacity: kappa_P = kappa_E = kappa_F = 2 cm^2/g, defined in the PGEN.
 radiation.reconstruction_order = 3
 radiation.cfl = 0.3
 radiation.max_substeps = 512
