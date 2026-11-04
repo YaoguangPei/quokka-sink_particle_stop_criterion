@@ -87,8 +87,7 @@ template <> struct SimulationData<SphereTurbIC> {
 	double velocity_scale = 0.;
 };
 // Fixed grey mass opacity [cm^2/g of gas]; energy and flux means default to this value.
-template <>
-AMREX_GPU_HOST_DEVICE AMREX_FORCE_INLINE auto RadSystem<SphereTurbIC>::ComputePlanckOpacity(double /*rho*/, double /*temperature*/) -> amrex::Real
+template <> AMREX_GPU_HOST_DEVICE AMREX_FORCE_INLINE auto RadSystem<SphereTurbIC>::ComputePlanckOpacity(double /*rho*/, double /*temperature*/) -> amrex::Real
 {
 	return 2.0;
 }
@@ -280,8 +279,7 @@ auto problem_main() -> int
 		       << " T_ambient=" << quokka::EOS<SphereTurbIC>::ComputeTgasFromEint(rho_ambient, ambient_eint) << " P_cloud=" << P
 		       << " P_ambient=" << quokka::EOS<SphereTurbIC>::ComputePressure(rho_ambient, ambient_eint) << " refinement_N=" << jeans_refinement_ncells
 		       << " sink_N=4 accretion_density_floor=" << Particle_Traits<SphereTurbIC>::sink_accretion_density_floor
-		       << " self_gravity=ON RT_groups=1 forcing=OFF dust_gas_coeff=" << sim.dustGasInteractionCoeff_
-		       << " opacity_cm2_per_g=2"
+		       << " self_gravity=ON RT_groups=1 forcing=OFF dust_gas_coeff=" << sim.dustGasInteractionCoeff_ << " opacity_cm2_per_g=2"
 		       << " automatic_thermal_balance=OFF extra_heating_vol=" << sim.volumetricHeatingRate_ << " velocity_HDF5_layout=C_order_corrected\n";
 	sim.setInitialConditions();
 	sim.evolve();
