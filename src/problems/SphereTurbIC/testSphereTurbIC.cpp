@@ -170,7 +170,7 @@ template <> void QuokkaSimulation<SphereTurbIC>::preCalculateInitialConditions()
 	userData_.dvz.copy(vz);
 	amrex::Print() << std::setprecision(17) << "TURB_IC alpha_kin_uniform_sphere=" << alpha << " sigma3D_kms=" << sigma / 1.e5
 		       << " source_grid=" << userData_.size[0] << 'x' << userData_.size[1] << 'x' << userData_.size[2]
-		       << " forcing=OFF normalization=cloud_base_cells_COM_subtracted\n";
+		       << " forcing=OFF velocity_amplitude=uniform_box normalization=cloud_base_cells_COM_subtracted\n";
 }
 
 template <> void QuokkaSimulation<SphereTurbIC>::setInitialConditionsOnGrid(quokka::grid const &grid)
@@ -202,10 +202,10 @@ template <> void QuokkaSimulation<SphereTurbIC>::setInitialConditionsOnGrid(quok
 		const bool inside = r2 <= rcloud * rcloud;
 		const double rho = inside ? rho_cloud : rho_ambient;
 		const double eint = inside ? cloud_eint : ambient_eint;
-		const double weight = scale * rho / rho_cloud;
-		const double vx = weight * (sample(fx, size, pos, lo, length) - mean[0]);
-		const double vy = weight * (sample(fy, size, pos, lo, length) - mean[1]);
-		const double vz = weight * (sample(fz, size, pos, lo, length) - mean[2]);
+		// Apply the same velocity amplitude inside the cloud and throughout the ambient medium.
+		const double vx = scale * (sample(fx, size, pos, lo, length) - mean[0]);
+		const double vy = scale * (sample(fy, size, pos, lo, length) - mean[1]);
+		const double vz = scale * (sample(fz, size, pos, lo, length) - mean[2]);
 		for (int n = 0; n < Physics_Indices<SphereTurbIC>::nvarTotal_cc; ++n) {
 			state(i, j, k, n) = 0.;
 		}
@@ -277,13 +277,13 @@ auto problem_main() -> int
 	const auto lo = sim.geom[0].ProbLoArray();
 	const auto hi = sim.geom[0].ProbHiArray();
 	for (int d = 0; d < 3; ++d) {
-		AMREX_ALWAYS_ASSERT(std::abs((hi[d] - lo[d]) / (16. * radius) - 1.) < 1.e-10);
+		AMREX_ALWAYS_ASSERT(std::abs((hi[d] - lo[d]) / (8. * radius) - 1.) < 1.e-10);
 	}
 	const double eint = quokka::EOS<SphereTurbIC>::ComputeEintFromTgas(rho, cloud_temperature);
 	const double P = quokka::EOS<SphereTurbIC>::ComputePressure(rho, eint);
 	const double rho_ambient = ambient_number_density * particle_mass;
 	const double ambient_eint = quokka::EOS<SphereTurbIC>::ComputeEintFromPres(rho_ambient, P);
-	amrex::Print() << std::setprecision(17) << "SPHERE_IC R_pc=" << radius / C::parsec << " box_pc=" << 16. * radius / C::parsec << " rho_cloud=" << rho
+	amrex::Print() << std::setprecision(17) << "SPHERE_IC R_pc=" << radius / C::parsec << " box_pc=" << 8. * radius / C::parsec << " rho_cloud=" << rho
 		       << " m_H_g=" << hydrogen_mass << " tff_Myr=" << tff / seconds_per_myr << " T_requested=" << cloud_temperature
 		       << " T_EOS=" << quokka::EOS<SphereTurbIC>::ComputeTgasFromEint(rho, eint)
 		       << " T_ambient=" << quokka::EOS<SphereTurbIC>::ComputeTgasFromEint(rho_ambient, ambient_eint) << " P_cloud=" << P

@@ -2,9 +2,9 @@
 # Thermally balanced rerun: uniform volumetric background heating is calibrated at startup.
 # Radiation remains dynamical; this is initial gas-source balance, not a fixed-temperature model.
 # 1000 Msun sphere; rho = 2.33 m_H n, m_H=1.6735575e-24 g.
-# R=3.460368234972537 pc; box side=16R.
-geometry.prob_lo = [-8.5420645490876875e+19, -8.5420645490876875e+19, -8.5420645490876875e+19]
-geometry.prob_hi = [8.5420645490876875e+19, 8.5420645490876875e+19, 8.5420645490876875e+19]
+# R=3.460368234972537 pc; box side=4D=8R.
+geometry.prob_lo = [-4.27103227454384375e+19, -4.27103227454384375e+19, -4.27103227454384375e+19]
+geometry.prob_hi = [4.27103227454384375e+19, 4.27103227454384375e+19, 4.27103227454384375e+19]
 geometry.is_periodic = [0, 0, 0]
 amr.n_cell = [128, 128, 128]
 amr.max_level = 7
@@ -35,7 +35,8 @@ problem.cloud_temperature = 48.9
 problem.balance_thermal_sources = 1
 problem.radiation_temperature = 10.0
 problem.jeans_refinement_ncells = 10
-# Official StarCluster IC file interface. No time-dependent forcing.
+# StarCluster IC file interface; one velocity amplitude across the whole box, normalized to cloud alpha_kin=1.
+# No time-dependent forcing.
 perturb.filename = "src/turbulence/zdrv.hdf5"
 perturb.virial_parameter = 1.0
 turbulence.enabled = 0
