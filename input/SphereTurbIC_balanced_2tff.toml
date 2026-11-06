@@ -1,6 +1,8 @@
 # Stop after 2 initial free-fall times (6.741959080151068 Myr).
-# Thermally balanced rerun: uniform volumetric background heating is calibrated at startup.
-# Radiation remains dynamical; this is initial gas-source balance, not a fixed-temperature model.
+# The PGEN initializes equal gas pressures; it does not calibrate thermal source balance.
+# Radiation and cooling remain dynamical; temperatures are not held fixed.
+# Quokka runtime parameters: https://quokka-astro.github.io/quokka/parameters.html
+# Geometry/mesh parameters: https://amrex-codes.github.io/amrex/docs_html/RuntimeParameters.html
 # 1000 Msun sphere; rho = 2.33 m_H n, m_H=1.6735575e-24 g.
 # R=3.460368234972537 pc; box side=4D=8R.
 geometry.prob_lo = [-4.27103227454384375e+19, -4.27103227454384375e+19, -4.27103227454384375e+19]
@@ -12,7 +14,7 @@ amr.blocking_factor = 8
 amr.max_grid_size = 32
 amr.n_error_buf = 3
 amr.grid_eff = 0.8
-amr.v = 1
+amr.verbose = 1
 regrid_interval = 2
 do_reflux = 1
 do_subcycle = 0
@@ -23,17 +25,17 @@ hydro.artificial_viscosity_coefficient = 0.1
 cfl = 0.3
 init_shrink = 0.1
 cooling.enabled = 1
-cooling.cooling_table_type = "resampled"
 cooling.hdf5_data_file = "extern/cooling/CloudyData_UVB=HM2012_shielded_resampled.h5"
 heating_rate_external = "0.0"
 density_floor = 3.8993889750000006e-25
 temperature_floor = 10.0
+# PGEN-specific IC inputs, read explicitly in src/problems/SphereTurbIC/testSphereTurbIC.cpp.
 problem.cloud_mass_msun = 1000.0
 problem.cloud_number_density = 100.0
 problem.ambient_number_density = 1.0
 problem.cloud_temperature = 48.9
-problem.balance_thermal_sources = 1
 problem.radiation_temperature = 10.0
+# PGEN-specific Jeans tagging parameter, read by problem_main() and used by refineGrid().
 problem.jeans_refinement_ncells = 10
 # StarCluster IC file interface; one velocity amplitude across the whole box, normalized to cloud alpha_kin=1.
 # No time-dependent forcing.
@@ -43,13 +45,9 @@ turbulence.enabled = 0
 particles.verbose = 1
 particles.sink_particle_use_uniform_kernel = false
 particles.disable_particle_drift = false
-particles.sink_accretion_jeans_floor_fraction = 0.0
-particles.sink_creation_require_bound = false
-particles.sink_creation_bound_audit = false
 # Fixed grey opacity: kappa_P = kappa_E = kappa_F = 2 cm^2/g, defined in the PGEN.
 radiation.reconstruction_order = 3
 radiation.cfl = 0.3
-radiation.max_substeps = 512
 radiation.dust_gas_interaction_coeff = 2.5e-32
 stop_time = 212760047867775.34
 max_timesteps = 100000000
