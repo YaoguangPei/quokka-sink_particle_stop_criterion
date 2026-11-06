@@ -98,7 +98,7 @@ the Sink creation threshold uses N = 4 instead.
   temperature is not a prescribed, permanently fixed dust temperature or an
   externally maintained ISRF.
 - The PGEN sets constant mass opacities
-  kappa_P = kappa_E = kappa_F = 2 cm^2 g^-1 of gas.
+  kappa_P = kappa_F = 2 cm^2 g^-1 of gas.
 - The reduced speed of light is c_hat/c = 1e-4. The radiation-energy floor
   corresponds to a blackbody temperature of 2.725 K.
 - `radiation.dust_gas_interaction_coeff = 2.5e-32`, in the code's units of
