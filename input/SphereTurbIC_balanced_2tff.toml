@@ -1,6 +1,7 @@
 # Stop after 2 initial free-fall times (6.741959080151068 Myr).
 # The PGEN initializes equal gas pressures; it does not calibrate thermal source balance.
 # Radiation and cooling remain dynamical; temperatures are not held fixed.
+# Setup and criteria: input/SphereTurbIC_setup.md
 # Quokka runtime parameters: https://quokka-astro.github.io/quokka/parameters.html
 # Geometry/mesh parameters: https://amrex-codes.github.io/amrex/docs_html/RuntimeParameters.html
 # 1000 Msun sphere; rho = 2.33 m_H n, m_H=1.6735575e-24 g.
@@ -25,7 +26,7 @@ hydro.artificial_viscosity_coefficient = 0.1
 cfl = 0.3
 init_shrink = 0.1
 cooling.enabled = 1
-cooling.hdf5_data_file = "extern/cooling/CloudyData_UVB=HM2012_shielded_resampled.h5"
+cooling.hdf5_data_file = "extern/cooling/CloudyData_UVB=HM2012_shielded_resampled_noPE.h5"
 heating_rate_external = "0.0"
 density_floor = 3.8993889750000006e-25
 temperature_floor = 10.0

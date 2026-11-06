@@ -262,7 +262,16 @@ auto problem_main() -> int
 	const double rho = cloud_number_density * particle_mass;
 	radius = std::cbrt(3. * cloud_mass_msun * C::M_solar / (4. * M_PI * rho));
 	const double tff = std::sqrt(3. * M_PI / (32. * C::Gconst * rho));
+	// Reflect the gas; extrapolate only radiation energy and flux at every face.
 	auto bc = quokka::BC<SphereTurbIC>(quokka::BCType::reflecting);
+	constexpr int first_rad = RadSystem<SphereTurbIC>::radEnergy_index;
+	constexpr int nrad = Physics_Traits<SphereTurbIC>::nGroups * Physics_NumVars::numRadVarsPerGroup;
+	for (int n = first_rad; n < first_rad + nrad; ++n) {
+		for (int d = 0; d < AMREX_SPACEDIM; ++d) {
+			bc[n].setLo(d, amrex::BCType::foextrap);
+			bc[n].setHi(d, amrex::BCType::foextrap);
+		}
+	}
 	QuokkaSimulation<SphereTurbIC> sim(bc);
 	const auto lo = sim.geom[0].ProbLoArray();
 	const auto hi = sim.geom[0].ProbHiArray();

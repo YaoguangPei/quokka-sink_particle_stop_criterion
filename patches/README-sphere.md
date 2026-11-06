@@ -7,6 +7,7 @@ The velocity field is an initial condition; `turbulence.enabled = 0`.
 
 Main problem: `src/problems/SphereTurbIC/`.
 Main input: `input/SphereTurbIC_balanced_2tff.toml`, with stop_time = 2 tff.
+Setup and physical criteria: [SphereTurbIC setup](../input/SphereTurbIC_setup.md).
 The original misplaced root-level PGEN and TOML are not present in this tree.
 
 The AMReX dependency remains pinned to the tested base commit
@@ -20,16 +21,17 @@ git -C extern/amrex apply --check ../../patches/amrex-openbc-5664.patch
 git -C extern/amrex apply ../../patches/amrex-openbc-5664.patch
 ```
 
-The current PGEN's optional uniform volumetric heating requires the accompanying
-QuokkaSimulation.hpp and ResampledCooling.hpp changes included here. The fixed
-remaining-gas Sink accretion floor and its supporting particle changes are also
-included. This is the later thermally balanced setup; the figures from job167827
-were produced with the older initial conditions. This is not a noPE run: the
-original cooling table, RT, and 100x gas-dust thermal coupling are retained.
-The ambient equilibrium branch is thermally unstable to isobaric perturbations.
+The fixed remaining-gas Sink accretion floor and its supporting particle changes
+are included. The current input uses the shielded noPE cooling table, RT, and
+100x gas-dust thermal coupling. Gas starts in pressure balance; the PGEN does
+not calibrate thermal-source balance or keep the gas temperatures fixed.
+Gas boundaries reflect; radiation energy and flux use `foextrap` on all faces.
+The figures from job167827 were produced with older initial conditions and do
+not document this current setup.
 
 Run from the repository root, with the same input data at:
-`extern/cooling/CloudyData_UVB=HM2012_shielded_resampled.h5` and
+`extern/cooling/CloudyData_UVB=HM2012_shielded_resampled_noPE.h5` and
 `src/turbulence/zdrv.hdf5`. The input uses relative paths for review portability.
 The requested output intervals remain 0.01 Myr (plots) and 0.1 Myr (checkpoints).
-No production job, source working tree, or server input was modified by this export.
+This repository update does not modify production jobs, the SilkRiver source
+working tree, or server inputs.
