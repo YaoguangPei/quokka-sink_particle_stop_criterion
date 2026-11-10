@@ -8,27 +8,35 @@
 # R=3.460368234972537 pc; box side=4D=8R.
 geometry.prob_lo = [-4.27103227454384375e+19, -4.27103227454384375e+19, -4.27103227454384375e+19]
 geometry.prob_hi = [4.27103227454384375e+19, 4.27103227454384375e+19, 4.27103227454384375e+19]
-geometry.is_periodic = [0, 0, 0]
+quokka.bc = ["reflecting", "reflecting", "reflecting"]
+
+amr.v = 1  # verbosity in Amr
 amr.n_cell = [128, 128, 128]
 amr.max_level = 7
-amr.blocking_factor = 8
-amr.max_grid_size = 32
+amr.blocking_factor = 32
+amr.max_grid_size = 128
 amr.n_error_buf = 3
-amr.grid_eff = 0.8
-amr.verbose = 1
+amr.grid_eff = 0.7
+
 regrid_interval = 2
 do_reflux = 1
 do_subcycle = 0
 poisson_supercycle_interval = 1
 hydro.reconstruction_order = 3
 hydro.use_dual_energy = 1
-hydro.artificial_viscosity_coefficient = 0.1
+# artificial viscosity is not necessary; turn back on if found helpful
+# hydro.artificial_viscosity_coefficient = 0.1
+
 cfl = 0.3
 init_shrink = 0.1
 cooling.enabled = 1
+cooling.cooling_table_type = "resampled"
 cooling.hdf5_data_file = "extern/cooling/CloudyData_UVB=HM2012_shielded_resampled_noPE.h5"
-heating_rate_external = "0.0"
-density_floor = 3.8993889750000006e-25
+# turn of external heating
+# heating_rate_external = "0.0"
+# optionally, set a initial heating rate and let it saturate at t=tff
+# heating_rate_external = "max(min(1.0, 2.0 - time / (32 * Myr)), 0.0024) * 2e-26" # unit: erg/s/H. Gamma_0 = 2e-26
+density_floor = 1.67e-26 # 0.01 cm^-3
 temperature_floor = 10.0
 # PGEN-specific IC inputs, read explicitly in src/problems/SphereTurbIC/testSphereTurbIC.cpp.
 problem.cloud_mass_msun = 1000.0
@@ -44,21 +52,33 @@ perturb.filename = "src/turbulence/zdrv.hdf5"
 perturb.virial_parameter = 1.0
 turbulence.enabled = 0
 particles.verbose = 1
-particles.sink_particle_use_uniform_kernel = false
-particles.disable_particle_drift = false
 # Fixed grey opacity: kappa_P = kappa_F = 2 cm^2/g, defined in the PGEN.
-radiation.reconstruction_order = 3
-radiation.cfl = 0.3
-radiation.dust_gas_interaction_coeff = 2.5e-32
-stop_time = 212760047867775.34
+radiation.cfl = 0.5 # stability boundary 1/sqrt(3)
+radiation.dust_gas_interaction_coeff = 2.5e-32 # 100x empirical value
+stop_time = "7*Myr"
 max_timesteps = 100000000
 # Seconds: plt every 0.01 Myr, chk every 0.1 Myr.
-plottime_interval = 3.15576e11
-checkpointtime_interval = 3.15576e12
-checkpoint_interval = 100000000
+plottime_interval = "0.1*Myr"
+checkpointtime_interval = "0.1*Myr"
+# checkpoint_interval = 100000000 # delete; conflicts with checkpointtime_interval
 plotfile_prefix = "balanced_turbIC_plt"
 checkpoint_prefix = "balanced_turbIC_chk"
-statistics_interval = 10
+statistics_interval = 512
 statistics_file = "balanced_turbIC_statistics.txt"
 skip_initial_plotfile = 0
 derived_vars = ["temperature", "number_density", "sound_speed", "jeans_length", "gpot"]
+
+quokka.diagnostics = ["slice_x", "proj"]
+
+quokka.slice_x.type = "DiagFramePlane"
+quokka.slice_x.file = "slicex_plt"
+quokka.slice_x.normal = 0  # Plane normal (0 == x, 1 == y, 2 == z)
+quokka.slice_x.center = 1e12 # ~0, domain center
+quokka.slice_x.time_int = "0.01*Myr"
+quokka.slice_x.field_names = ["gasDensity", "gasEnergy", "gasInternalEnergy", "x-GasMomentum", "y-GasMomentum", "z-GasMomentum", "temperature"]
+
+quokka.proj.type = "ProjectionPlot"  # Projection plot diagnostic
+quokka.proj.file = "proj_plt"  # Output file prefix (must end in "plt")
+quokka.proj.time_int = "0.01*Myr"
+quokka.proj.normal = 0  # Plane normal (0 == x, 1 == y, 2 == z)
+quokka.proj.field_names = ["gasDensity", "gasEnergy", "gasInternalEnergy", "x-GasMomentum", "y-GasMomentum", "z-GasMomentum", "temperature"]
